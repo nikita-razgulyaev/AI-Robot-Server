@@ -19,7 +19,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Robot AI Server - Soren", version="2.2")
+app = FastAPI(title="Robot AI Server - Soren", version="3.0")
 
 robot_brain: RobotBrain = None
 active_connections: Set[WebSocket] = set()
@@ -49,9 +49,10 @@ async def shutdown():
 async def root():
     return {
         "status": "Robot AI Server - Soren is running",
-        "version": "2.2",
+        "version": "3.0",
         "audio_input_mode": audio_input_mode,
-        "audio_output_mode": audio_output_mode
+        "audio_output_mode": audio_output_mode,
+        "ai_modes": robot_brain.get_modes() if robot_brain else {}
     }
 
 @app.get("/status")
@@ -62,6 +63,7 @@ async def status():
         "status": "ready",
         "audio_input_mode": audio_input_mode,
         "audio_output_mode": audio_output_mode,
+        "ai_modes": robot_brain.get_modes(),
         "connections": len(active_connections),
         "servo_angles": robot_brain.servos.get_current_angles(),
         "vision_context": robot_brain.vision_context,
@@ -70,11 +72,6 @@ async def status():
 
 @app.post("/audio_mode")
 async def set_audio_mode(mode: str = Form(...), type: str = Form("output")):
-    """
-    Переключение режима аудио.
-    type: "input" (микрофон) или "output" (динамик/наушники)
-    mode: "robot" или "local"
-    """
     global audio_input_mode, audio_output_mode
 
     if mode not in ["robot", "local"]:
@@ -86,38 +83,59 @@ async def set_audio_mode(mode: str = Form(...), type: str = Form("output")):
     if type == "input":
         audio_input_mode = mode
         logger.info(f"🎤 Режим ВВОДА аудио изменён: {mode}")
-        return JSONResponse({
-            "status": "ok",
-            "audio_input_mode": audio_input_mode,
-            "audio_output_mode": audio_output_mode
-        })
     elif type == "output":
         audio_output_mode = mode
         logger.info(f"🔊 Режим ВЫВОДА аудио изменён: {mode}")
-        return JSONResponse({
-            "status": "ok",
-            "audio_input_mode": audio_input_mode,
-            "audio_output_mode": audio_output_mode
-        })
     else:
         return JSONResponse(
             {"status": "error", "message": "Invalid type. Use 'input' or 'output'"},
             status_code=400
         )
 
+    return JSONResponse({
+        "status": "ok",
+        "audio_input_mode": audio_input_mode,
+        "audio_output_mode": audio_output_mode
+    })
+
+@app.post("/ai_mode")
+async def set_ai_mode(module: str = Form(...), mode: str = Form(...)):
+    """
+    Переключение режима AI модулей.
+    module: "stt", "tts", "llm"
+    mode: "local" или "cloud"
+    """
+    if module not in ["stt", "tts", "llm"]:
+        return JSONResponse(
+            {"status": "error", "message": "Invalid module. Use 'stt', 'tts' or 'llm'"},
+            status_code=400
+        )
+
+    if mode not in ["local", "cloud"]:
+        return JSONResponse(
+            {"status": "error", "message": "Invalid mode. Use 'local' or 'cloud'"},
+            status_code=400
+        )
+
+    if robot_brain is None:
+        return JSONResponse({"status": "error", "message": "Сервер ещё загружается"})
+
+    result = await robot_brain.handle_command({"type": "set_mode", "module": module, "mode": mode})
+    logger.info(f"🧠 Режим {module.upper()} изменён: {mode}")
+
+    return JSONResponse(result)
+
 @app.post("/speak")
 async def speak_text(text: str = Form(...)):
-    """HTTP endpoint для текстового ввода → LLM → TTS → аудио"""
     logger.info(f"/speak вызван: '{text}'")
 
     if robot_brain is None:
         return JSONResponse({"status": "error", "message": "Сервер ещё загружается"})
 
-    if robot_brain.llm is None or robot_brain.llm.model is None:
-        return JSONResponse({"status": "error", "message": "LLM модель не загружена"})
+    if robot_brain.llm is None:
+        return JSONResponse({"status": "error", "message": "LLM не инициализирован"})
 
     try:
-        # Применяем fuzzy correction к тексту
         try:
             from modules.fuzzy_matcher import correct_speech_text
             raw_text = text
@@ -168,7 +186,8 @@ async def speak_text(text: str = Form(...)):
             "eye_led": eye_led,
             "audio_base64": audio_b64,
             "audio_input_mode": audio_input_mode,
-            "audio_output_mode": audio_output_mode
+            "audio_output_mode": audio_output_mode,
+            "ai_modes": robot_brain.get_modes()
         })
 
     except Exception as e:
@@ -183,8 +202,6 @@ async def voice_input(
     audio: UploadFile = File(...),
     audio_output_mode_param: str = Form("")
 ):
-    """Голосовой ввод: аудио файл → STT → fuzzy correction → LLM → TTS → аудио ответ"""
-    # Используем переданный параметр или глобальный режим
     current_output_mode = audio_output_mode_param if audio_output_mode_param in ["robot", "local"] else audio_output_mode
 
     logger.info(f"🎤 Голосовой ввод: {audio.filename}, {audio.size} bytes, output_mode={current_output_mode}")
@@ -205,7 +222,6 @@ async def voice_input(
         if not stt_result.get("success"):
             return JSONResponse({"status": "error", "message": "Речь не распознана", "stt_error": stt_result.get("error")})
 
-        # Используем исправленный текст (fuzzy matching)
         raw_text = stt_result["text"]
         user_text = stt_result.get("corrected_text", raw_text) or raw_text
 
@@ -232,7 +248,6 @@ async def voice_input(
         else:
             robot_brain.servos.set_all_servos(servo_angles)
 
-        # Если вывод локальный — кодируем аудио в base64 для браузера
         audio_b64 = ""
         if current_output_mode == "local" and tts_audio:
             wav_buffer = io.BytesIO()
@@ -255,7 +270,8 @@ async def voice_input(
             "eye_led": eye_led,
             "audio_base64": audio_b64,
             "audio_input_mode": audio_input_mode,
-            "audio_output_mode": current_output_mode
+            "audio_output_mode": current_output_mode,
+            "ai_modes": robot_brain.get_modes()
         })
 
     except Exception as e:
@@ -294,17 +310,21 @@ async def handle_text_message(websocket: WebSocket, text: str):
         data = json.loads(text)
         msg_type = data.get("type")
 
-        if msg_type in ["servo", "servo_multi", "animation", "text", "get_status", "clear_history"]:
+        if msg_type in ["servo", "servo_multi", "animation", "text", "get_status", "clear_history", "set_mode"]:
             result = await robot_brain.handle_command(data)
             await websocket.send_json(result)
         elif msg_type == "ping":
             await websocket.send_json({"type": "pong", "timestamp": data.get("timestamp")})
         elif msg_type == "audio_mode":
-            # Отправляем оба режима
             await websocket.send_json({
                 "type": "audio_mode",
                 "input_mode": audio_input_mode,
                 "output_mode": audio_output_mode
+            })
+        elif msg_type == "ai_mode":
+            await websocket.send_json({
+                "type": "ai_mode",
+                "modes": robot_brain.get_modes()
             })
         else:
             await websocket.send_json({"status": "error", "message": f"Неизвестный тип: {msg_type}"})
@@ -332,11 +352,11 @@ async def handle_binary_message(websocket: WebSocket, data: bytes):
                     "action": result.get("action"),
                     "emotion": result.get("emotion", "calm"),
                     "servo_angles": result.get("servo_angles", [90]*18),
-                    "eye_led": result.get("eye_led", "soft_white_low")
+                    "eye_led": result.get("eye_led", "soft_white_low"),
+                    "ai_modes": robot_brain.get_modes()
                 }
                 await websocket.send_json(response)
 
-                # Отправляем аудио только если вывод на робота
                 if result["audio"] and audio_output_mode == "robot":
                     audio_packet = b"AUDI" + result["audio"]
                     await websocket.send_bytes(audio_packet)
@@ -361,15 +381,15 @@ async def control_panel():
     return PANEL_HTML
 
 
-# HTML панель управления
 PANEL_HTML = """<!DOCTYPE html>
 <html>
 <head>
-    <title>Soren Control Panel</title>
+    <title>Soren Control Panel v3.0</title>
     <meta charset="utf-8">
     <style>
-        body { font-family: 'Segoe UI', Arial, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; max-width: 1200px; margin: 0 auto; }
+        body { font-family: 'Segoe UI', Arial, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; max-width: 1400px; margin: 0 auto; }
         h1 { color: #00d4ff; text-align: center; }
+        h2 { color: #00d4ff; font-size: 18px; margin-top: 0; }
         .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
         .section { background: #16213e; border-radius: 10px; padding: 20px; margin: 10px 0; }
         .section-full { grid-column: 1 / -1; }
@@ -382,6 +402,10 @@ PANEL_HTML = """<!DOCTYPE html>
         button.success { background: #00ff88; color: #000; }
         button.mic { background: #ff6b00; color: #fff; font-size: 18px; padding: 15px 30px; }
         button.mic.recording { background: #ff0000; animation: pulse 1s infinite; }
+        button.mode-btn { font-size: 12px; padding: 8px 16px; }
+        button.mode-btn.active { background: #00ff88; color: #000; }
+        button.mode-btn.inactive { background: #444; color: #888; }
+        button.mode-btn:hover { opacity: 0.8; }
         @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
         #log { background: #0a0a0a; padding: 10px; height: 250px; overflow-y: scroll; font-family: monospace; font-size: 12px; border-radius: 5px; }
         .chat-container { display: flex; flex-direction: column; gap: 10px; }
@@ -416,16 +440,54 @@ PANEL_HTML = """<!DOCTYPE html>
         .audio-visualizer { width: 100%; height: 40px; background: #0a0a0a; border-radius: 5px; margin: 10px 0; display: none; }
         .audio-visualizer.active { display: block; }
         .mode-label { font-size: 12px; font-weight: bold; }
+        .ai-mode-panel { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+        .ai-module { background: #0a1628; border: 1px solid #1a3a5c; border-radius: 8px; padding: 15px; text-align: center; }
+        .ai-module h3 { margin: 0 0 10px 0; color: #00d4ff; font-size: 16px; }
+        .ai-module .status { font-size: 13px; margin: 8px 0; font-weight: bold; }
+        .ai-module .status.cloud { color: #00ff88; }
+        .ai-module .status.local { color: #4a90d9; }
+        .ai-module .status.error { color: #ff4444; }
+        .ai-module .desc { font-size: 11px; color: #666; margin-top: 8px; }
     </style>
 </head>
 <body>
-    <h1>🦉 Soren Control Panel</h1>
+    <h1>🦉 Soren Control Panel v3.0</h1>
+
+    <!-- Режимы AI модулей -->
+    <div class="section section-full">
+        <h2>🧠 Режимы AI модулей (Local / Cloud)</h2>
+        <div class="ai-mode-panel" id="ai-mode-panel">
+            <div class="ai-module">
+                <h3>🎤 STT — Распознавание речи</h3>
+                <div class="status" id="stt-status">Загрузка...</div>
+                <button class="mode-btn" id="stt-local-btn" onclick="setAIMode('stt', 'local')">💻 Локально</button>
+                <button class="mode-btn" id="stt-cloud-btn" onclick="setAIMode('stt', 'cloud')">☁️ Облако</button>
+                <div class="desc">Локально: faster-whisper (~500MB)<br>Облако: недоступно (нужен VPN)</div>
+            </div>
+            <div class="ai-module">
+                <h3>🧠 LLM — Языковая модель</h3>
+                <div class="status" id="llm-status">Загрузка...</div>
+                <button class="mode-btn" id="llm-local-btn" onclick="setAIMode('llm', 'local')">💻 Локально</button>
+                <button class="mode-btn" id="llm-cloud-btn" onclick="setAIMode('llm', 'cloud')">☁️ Облако</button>
+                <div class="desc">Локально: Qwen 7B (~4.5GB)<br>Облако: GitHub Models</div>
+            </div>
+            <div class="ai-module">
+                <h3>🔊 TTS — Синтез речи</h3>
+                <div class="status" id="tts-status">Загрузка...</div>
+                <button class="mode-btn" id="tts-local-btn" onclick="setAIMode('tts', 'local')">💻 Локально</button>
+                <button class="mode-btn" id="tts-cloud-btn" onclick="setAIMode('tts', 'cloud')">☁️ Облако</button>
+                <div class="desc">Локально: Silero (~120MB)<br>Облако: FreeTTS (edge-tts)</div>
+            </div>
+        </div>
+        <div style="font-size: 12px; color: #888; margin-top: 12px; text-align: center;">
+            ⚠️ Для облачного LLM нужен <b>GITHUB_MODELS_KEY</b> (токен GitHub)
+        </div>
+    </div>
 
     <!-- Режимы аудио -->
     <div class="section section-full">
-        <h2>🔊 Режимы аудио</h2>
+        <h2>🔊 Режимы аудио (Robot / Local)</h2>
         <div class="audio-controls">
-            <!-- ВВОД звука (микрофон) -->
             <div class="audio-control-group">
                 <label>🎤 <b>Ввод звука:</b></label>
                 <label class="toggle-switch">
@@ -434,8 +496,6 @@ PANEL_HTML = """<!DOCTYPE html>
                 </label>
                 <span id="audio-input-mode-text" class="mode-robot mode-label">🔊 Робот (ESP32 микрофон)</span>
             </div>
-
-            <!-- ВЫВОД звука (динамик/наушники) -->
             <div class="audio-control-group">
                 <label>🔊 <b>Вывод звука:</b></label>
                 <label class="toggle-switch">
@@ -444,12 +504,7 @@ PANEL_HTML = """<!DOCTYPE html>
                 </label>
                 <span id="audio-output-mode-text" class="mode-robot mode-label">🔊 Робот (ESP32 динамик)</span>
             </div>
-
             <span id="connection-status" style="margin-left: auto; font-size: 14px;">● OFFLINE</span>
-        </div>
-        <div style="font-size: 12px; color: #888; margin-top: 8px; padding-left: 10px;">
-            🎤 <b>Ввод:</b> Робот = микрофон на ESP32 | Локально = микрофон ноутбука &nbsp;&nbsp;|&nbsp;&nbsp;
-            🔊 <b>Вывод:</b> Робот = динамик на ESP32 | Локально = наушники ноутбука
         </div>
     </div>
 
@@ -478,7 +533,6 @@ PANEL_HTML = """<!DOCTYPE html>
                 </div>
             </div>
         </div>
-
         <div class="section">
             <h2>🎬 Анимации</h2>
             <button onclick="sendCmd({type:'animation',name:'wave'})">👋 Помахать</button>
@@ -508,19 +562,17 @@ PANEL_HTML = """<!DOCTYPE html>
     <audio id="audio-player" style="display:none;"></audio>
 
     <script>
-        // ===== WebSocket =====
         const ws = new WebSocket(`ws://${window.location.host}/ws`);
-
-        // Режимы аудио
-        let audioInputMode = 'robot';   // 'robot' = ESP32 микрофон, 'local' = микрофон ноутбука
-        let audioOutputMode = 'robot';  // 'robot' = ESP32 динамик, 'local' = наушники ноутбука
+        let audioInputMode = 'robot';
+        let audioOutputMode = 'robot';
+        let aiModes = { stt: 'local', tts: 'local', llm: 'local' };
 
         ws.onopen = () => {
             document.getElementById('connection-status').textContent = '● ONLINE';
             document.getElementById('connection-status').style.color = '#00ff88';
             log('WebSocket подключен');
-            // Запрашиваем текущие режимы
             ws.send(JSON.stringify({type: 'audio_mode'}));
+            ws.send(JSON.stringify({type: 'ai_mode'}));
         };
 
         ws.onclose = () => {
@@ -535,51 +587,105 @@ PANEL_HTML = """<!DOCTYPE html>
             if (data.angles) updateServoDisplay(data.angles);
             if (data.emotion) log('Эмоция: ' + data.emotion);
             if (data.type === 'audio_mode') {
-                // Сервер прислал текущие режимы
                 if (data.input_mode) audioInputMode = data.input_mode;
                 if (data.output_mode) audioOutputMode = data.output_mode;
                 updateAudioModeUI();
             }
+            if (data.type === 'ai_mode' && data.modes) {
+                aiModes = data.modes;
+                updateAIModeUI();
+            }
+            if (data.modes && !data.type) {
+                aiModes = data.modes;
+                updateAIModeUI();
+            }
         };
 
-        // ===== ВВОД звука (микрофон) =====
+        // ===== AI MODE SWITCHING =====
+        async function setAIMode(module, mode) {
+            log(`🧠 Переключение ${module.toUpperCase()} → ${mode}...`);
+            const formData = new FormData();
+            formData.append('module', module);
+            formData.append('mode', mode);
+
+            try {
+                const response = await fetch('/ai_mode', {method: 'POST', body: formData});
+                const data = await response.json();
+                if (data.status === 'ok') {
+                    if (data.modes) {
+                        aiModes = data.modes;
+                        updateAIModeUI();
+                    }
+                    log(`✅ ${module.toUpperCase()} переключён на ${mode}`);
+                } else {
+                    log('❌ Ошибка: ' + (data.message || 'Неизвестная'));
+                    // Обновим UI на случай если сервер вернул текущие режимы
+                    if (data.modes) {
+                        aiModes = data.modes;
+                        updateAIModeUI();
+                    }
+                }
+            } catch (e) {
+                log('❌ Сетевая ошибка: ' + e.message);
+            }
+        }
+
+        function updateAIModeUI() {
+            const modules = ['stt', 'llm', 'tts'];
+            modules.forEach(mod => {
+                const mode = aiModes[mod] || 'local';
+                const statusEl = document.getElementById(mod + '-status');
+                const localBtn = document.getElementById(mod + '-local-btn');
+                const cloudBtn = document.getElementById(mod + '-cloud-btn');
+
+                if (statusEl) {
+                    if (mode === 'cloud') {
+                        statusEl.textContent = '☁️ Облачный';
+                        statusEl.className = 'status cloud';
+                    } else {
+                        statusEl.textContent = '💻 Локальный';
+                        statusEl.className = 'status local';
+                    }
+                }
+                if (localBtn) {
+                    localBtn.className = 'mode-btn ' + (mode === 'local' ? 'active' : 'inactive');
+                }
+                if (cloudBtn) {
+                    cloudBtn.className = 'mode-btn ' + (mode === 'cloud' ? 'active' : 'inactive');
+                }
+            });
+        }
+
+        // ===== AUDIO MODES =====
         async function toggleAudioInputMode() {
             const toggle = document.getElementById('audio-input-toggle');
             const newMode = toggle.checked ? 'local' : 'robot';
-
             const formData = new FormData();
             formData.append('mode', newMode);
             formData.append('type', 'input');
-
             const response = await fetch('/audio_mode', {method: 'POST', body: formData});
             const data = await response.json();
             if (data.status === 'ok') {
                 audioInputMode = data.audio_input_mode;
                 updateAudioModeUI();
-                log('🎤 Режим ввода: ' + audioInputMode);
             }
         }
 
-        // ===== ВЫВОД звука (динамик/наушники) =====
         async function toggleAudioOutputMode() {
             const toggle = document.getElementById('audio-output-toggle');
             const newMode = toggle.checked ? 'local' : 'robot';
-
             const formData = new FormData();
             formData.append('mode', newMode);
             formData.append('type', 'output');
-
             const response = await fetch('/audio_mode', {method: 'POST', body: formData});
             const data = await response.json();
             if (data.status === 'ok') {
                 audioOutputMode = data.audio_output_mode;
                 updateAudioModeUI();
-                log('🔊 Режим вывода: ' + audioOutputMode);
             }
         }
 
         function updateAudioModeUI() {
-            // Ввод
             const inputToggle = document.getElementById('audio-input-toggle');
             const inputText = document.getElementById('audio-input-mode-text');
             inputToggle.checked = (audioInputMode === 'local');
@@ -591,7 +697,6 @@ PANEL_HTML = """<!DOCTYPE html>
                 inputText.className = 'mode-robot mode-label';
             }
 
-            // Вывод
             const outputToggle = document.getElementById('audio-output-toggle');
             const outputText = document.getElementById('audio-output-mode-text');
             outputToggle.checked = (audioOutputMode === 'local');
@@ -604,7 +709,7 @@ PANEL_HTML = """<!DOCTYPE html>
             }
         }
 
-        // ===== Голосовой ввод =====
+        // ===== VOICE =====
         let mediaRecorder = null;
         let audioChunks = [];
         let isRecording = false;
@@ -624,17 +729,12 @@ PANEL_HTML = """<!DOCTYPE html>
                     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                     mediaRecorder = new MediaRecorder(stream);
                     audioChunks = [];
-
-                    mediaRecorder.ondataavailable = (e) => {
-                        audioChunks.push(e.data);
-                    };
-
+                    mediaRecorder.ondataavailable = (e) => { audioChunks.push(e.data); };
                     mediaRecorder.onstop = async () => {
                         const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
                         await sendVoiceToServer(audioBlob);
                         stream.getTracks().forEach(track => track.stop());
                     };
-
                     mediaRecorder.start();
                     isRecording = true;
                     btn.textContent = '⏹ Остановить';
@@ -666,7 +766,6 @@ PANEL_HTML = """<!DOCTYPE html>
             const source = audioContext.createMediaStreamSource(stream);
             source.connect(analyser);
             analyser.fftSize = 256;
-
             visualizerCanvas = document.getElementById('audio-visualizer');
             visualizerCtx = visualizerCanvas.getContext('2d');
             visualizerCanvas.width = visualizerCanvas.offsetWidth;
@@ -697,7 +796,6 @@ PANEL_HTML = """<!DOCTYPE html>
             statusText.textContent = 'Отправка на сервер...';
             const formData = new FormData();
             formData.append('audio', audioBlob, 'voice.wav');
-            // Передаём текущий режим вывода звука
             formData.append('audio_output_mode_param', audioOutputMode);
             try {
                 const response = await fetch('/voice', { method: 'POST', body: formData });
@@ -706,9 +804,12 @@ PANEL_HTML = """<!DOCTYPE html>
                     addMessage('user', '🎤 ' + data.user_text);
                     const emotionClass = 'emotion-' + (data.emotion || 'calm');
                     addMessage('robot', data.response + `<span class="emotion-badge ${emotionClass}">${data.emotion}</span>`);
-                    // Если вывод локальный — проигрываем аудио на ПК
                     if (audioOutputMode === 'local' && data.audio_base64) {
                         playAudio(data.audio_base64);
+                    }
+                    if (data.ai_modes) {
+                        aiModes = data.ai_modes;
+                        updateAIModeUI();
                     }
                     statusText.textContent = 'Готово! Нажмите для новой записи';
                 } else {
@@ -721,19 +822,16 @@ PANEL_HTML = """<!DOCTYPE html>
             }
         }
 
-        // ===== Текстовый чат =====
+        // ===== CHAT =====
         async function sendChat() {
             const input = document.getElementById('chat-input');
             const text = input.value.trim();
             if (!text) return;
             input.value = '';
             addMessage('user', text);
-
-            // Если вывод на робот — отправляем через WebSocket
             if (audioOutputMode === 'robot') {
                 sendCmd({type: 'text', text: text});
             } else {
-                // Локальный вывод — через HTTP /speak
                 await sendLocal(text);
             }
         }
@@ -748,6 +846,10 @@ PANEL_HTML = """<!DOCTYPE html>
                     const emotionClass = 'emotion-' + (data.emotion || 'calm');
                     addMessage('robot', data.response + `<span class="emotion-badge ${emotionClass}">${data.emotion}</span>`);
                     if (data.audio_base64) playAudio(data.audio_base64);
+                    if (data.ai_modes) {
+                        aiModes = data.ai_modes;
+                        updateAIModeUI();
+                    }
                 } else {
                     addMessage('robot', 'Ошибка: ' + (data.message || 'Неизвестная'));
                 }
@@ -782,7 +884,7 @@ PANEL_HTML = """<!DOCTYPE html>
             el.scrollTop = el.scrollHeight;
         }
 
-        // ===== Сервоприводы =====
+        // ===== SERVOS =====
         function createServoGrid() {
             const grid = document.getElementById('servo-grid');
             for (let i = 0; i < 18; i++) {

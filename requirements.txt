@@ -7,12 +7,18 @@ uvicorn[standard]==0.30.0
 websockets==12.0
 python-multipart==0.0.9
 
-# STT - Speech-to-Text
+# HTTP запросы (для облачных API)
+requests==2.32.3
+
+# STT - Speech-to-Text (локальный)
 faster-whisper==1.0.3
 
-# TTS - Text-to-Speech (Silero вместо Piper)
+# TTS - Text-to-Speech (Silero локальный)
 torch==2.3.1
 torchaudio==2.3.1
+
+# TTS - FreeTTS (edge-tts облачный, бесплатный)
+edge-tts==6.1.12
 
 # LLM - Local Language Model
 llama-cpp-python==0.2.85

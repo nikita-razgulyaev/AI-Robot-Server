@@ -36,19 +36,16 @@ class EmotionEngine:
             logger.error(f"Ошибка загрузки эмоций: {e}")
 
     def get_pose(self, emotion: str) -> Optional[Dict[str, int]]:
-        """Возвращает servo_pose для эмоции"""
         if emotion in self.emotions:
             return self.emotions[emotion].get("servo_pose")
         return None
 
     def get_eye_led(self, emotion: str) -> str:
-        """Возвращает режим LED-глаз для эмоции"""
         if emotion in self.emotions:
             return self.emotions[emotion].get("eye_led", "soft_white_low")
         return "soft_white_low"
 
     def get_servo_angles(self, emotion: str) -> List[int]:
-        """Возвращает список углов [S0..S17] для эмоции"""
         pose = self.get_pose(emotion)
         if not pose:
             return [90] * 18
@@ -66,7 +63,6 @@ class RobotBrain:
     def __init__(self):
         logger.info("=== Инициализация RobotBrain (Сорен) ===")
 
-        # Загружаем модули
         self.stt = STTEngine()
         self.tts = TTSEngine()
         self.llm = LLMEngine()
@@ -74,7 +70,6 @@ class RobotBrain:
         self.audio_buffer = AudioBuffer()
         self.servos = ServoController()
 
-        # Эмоциональный движок Сорена
         emotions_path = CHARACTER_DIR / "Soren_emotions.json"
         self.emotion_engine = EmotionEngine(emotions_path)
 
@@ -84,27 +79,35 @@ class RobotBrain:
 
         logger.info("=== RobotBrain (Сорен) готов ===")
 
+    def set_stt_mode(self, mode: str):
+        """Переключает режим STT"""
+        self.stt.set_mode(mode)
+
+    def set_tts_mode(self, mode: str):
+        """Переключает режим TTS"""
+        self.tts.set_mode(mode)
+
+    def set_llm_mode(self, mode: str):
+        """Переключает режим LLM"""
+        self.llm.set_mode(mode)
+
+    def get_modes(self) -> Dict[str, str]:
+        """Возвращает текущие режимы всех модулей"""
+        return {
+            "stt": self.stt.get_mode(),
+            "tts": self.tts.get_mode(),
+            "llm": self.llm.get_mode()
+        }
+
     async def process_audio_chunk(self, pcm_bytes: bytes) -> Optional[dict]:
-        """
-        Обрабатывает чанк аудио от ESP32
-
-        Returns:
-            None - если речь ещё идёт
-            {"text": str, "response": str, "audio": bytes, "action": str, "emotion": str, "servo_angles": list} - когда речь закончена
-        """
         status, audio = self.audio_buffer.process_chunk(pcm_bytes)
-
         if status == "complete" and audio:
             return await self._process_speech(audio)
-
         return None
 
     async def _process_speech(self, audio_bytes: bytes) -> dict:
-        """Полный пайплайн: аудио → текст → fuzzy correction → LLM → эмоция → поза → TTS"""
         self.is_processing = True
-
         try:
-            # 1. STT: аудио → текст
             logger.info("Распознавание речи...")
             stt_result = self.stt.transcribe(audio_bytes)
 
@@ -112,7 +115,6 @@ class RobotBrain:
                 logger.warning("Речь не распознана")
                 return self._build_empty_response()
 
-            # Используем исправленный текст (fuzzy matching)
             raw_text = stt_result["text"]
             user_text = stt_result.get("corrected_text", raw_text) or raw_text
 
@@ -121,7 +123,6 @@ class RobotBrain:
 
             logger.info(f"Пользователь: {user_text}")
 
-            # 2. LLM: текст → ответ + эмоция
             logger.info("Генерация ответа Сорена...")
             llm_result = self.llm.generate(user_text, self.vision_context)
             response_text = llm_result["text"]
@@ -134,19 +135,15 @@ class RobotBrain:
             if action:
                 logger.info(f"Действие: {action}")
 
-            # 3. Эмоция → поза сервоприводов
             servo_angles = self.emotion_engine.get_servo_angles(emotion)
             eye_led = self.emotion_engine.get_eye_led(emotion)
 
-            # 4. TTS: ответ → аудио
             logger.info("Синтез речи...")
             tts_audio = self.tts.synthesize(response_text)
 
-            # 5. Выполняем действие с сервами (если есть)
             if action:
                 asyncio.create_task(self.servos.play_animation(action))
             else:
-                # Или просто ставим эмоциональную позу
                 self.servos.set_all_servos(servo_angles)
 
             return {
@@ -159,12 +156,10 @@ class RobotBrain:
                 "servo_angles": servo_angles,
                 "eye_led": eye_led
             }
-
         finally:
             self.is_processing = False
 
     def _build_empty_response(self) -> dict:
-        """Пустой ответ при ошибке"""
         return {
             "text": "",
             "raw_text": "",
@@ -177,24 +172,11 @@ class RobotBrain:
         }
 
     async def process_video_frame(self, frame_bytes: bytes) -> dict:
-        """
-        Обрабатывает кадр видео от ESP32
-
-        Returns:
-            {"servo_angles": list, "face_offset": (x,y), "description": str}
-        """
         vision_result = self.vision.process_frame(frame_bytes)
-
-        # Обновляем контекст для LLM
         self.vision_context = vision_result.get("description", "")
-
-        # Вычисляем углы серв для зеркалирования позы
         servo_angles = self.vision.get_servo_angles_from_pose()
-
-        # Получаем смещение лица для трекинга
         face_offset = self.vision.get_face_offset(640, 480)
 
-        # Если лицо обнаружено - поворачиваем голову
         if vision_result.get("face_detected"):
             servo_angles[16] = int(90 - face_offset[0] * 45)
             servo_angles[17] = int(90 + face_offset[1] * 30)
@@ -208,9 +190,6 @@ class RobotBrain:
         }
 
     async def handle_command(self, command: dict) -> dict:
-        """
-        Обрабатывает команды от ESP32 или веб-интерфейса
-        """
         cmd_type = command.get("type")
 
         if cmd_type == "servo":
@@ -226,8 +205,6 @@ class RobotBrain:
             return {"status": "ok", "animation": command["name"]}
 
         elif cmd_type == "text":
-            # Текстовый ввод → LLM → эмоция → поза → TTS
-            # Также применяем fuzzy correction к текстовому вводу
             try:
                 from modules.fuzzy_matcher import correct_speech_text
                 raw_text = command["text"]
@@ -267,7 +244,8 @@ class RobotBrain:
                 "servo_angles": self.servos.get_current_angles(),
                 "processing": self.is_processing,
                 "vision_context": self.vision_context,
-                "current_emotion": self.current_emotion
+                "current_emotion": self.current_emotion,
+                "modes": self.get_modes()
             }
 
         elif cmd_type == "clear_history":
@@ -275,10 +253,20 @@ class RobotBrain:
             self.current_emotion = "calm"
             return {"status": "ok", "message": "История очищена"}
 
+        elif cmd_type == "set_mode":
+            module = command.get("module")
+            mode = command.get("mode")
+            if module == "stt":
+                self.set_stt_mode(mode)
+            elif module == "tts":
+                self.set_tts_mode(mode)
+            elif module == "llm":
+                self.set_llm_mode(mode)
+            return {"status": "ok", "module": module, "mode": mode, "modes": self.get_modes()}
+
         else:
             return {"status": "error", "message": f"Неизвестная команда: {cmd_type}"}
 
     def shutdown(self):
-        """Освобождает ресурсы"""
         logger.info("Завершение работы RobotBrain...")
         self.vision.release()

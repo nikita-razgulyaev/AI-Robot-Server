@@ -24,19 +24,32 @@ AUDIO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 WIFI_SSID = os.getenv("WIFI_SSID", "")
 WIFI_PASSWORD = os.getenv("WIFI_PASSWORD", "")
 
-# STT
+# ========== STT ==========
+# Режим: только "local" (faster-whisper) — облачные STT без VPN не работают
+STT_MODE = os.getenv("STT_MODE", "local")
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
 WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 
-# TTS (Silero)
+# ========== TTS ==========
+# Режим: "local" (Silero) или "cloud" (FreeTTS / edge-tts)
+TTS_MODE = os.getenv("TTS_MODE", "local")
 SILERO_SPEAKER = os.getenv("SILERO_SPEAKER", "xenia")
+# Облачный TTS (FreeTTS — edge-tts, бесплатный Microsoft Edge TTS)
+FREETTS_VOICE = os.getenv("FREETTS_VOICE", "ru-RU-SvetlanaNeural")
+FREETTS_SPEED = float(os.getenv("FREETTS_SPEED", "1.0"))
 
-# LLM
+# ========== LLM ==========
+# Режим: "local" (llama.cpp) или "cloud" (GitHub Models API)
+LLM_MODE = os.getenv("LLM_MODE", "local")
+# Локальный LLM
 LLM_MODEL_PATH = Path(os.getenv("LLM_MODEL_PATH", "./models/qwen2.5-7b-instruct-q4_k_m.gguf"))
 LLM_N_CTX = int(os.getenv("LLM_N_CTX", "4096"))
 LLM_N_THREADS = int(os.getenv("LLM_N_THREADS", "4"))
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.6"))
+# Облачный LLM (GitHub Models API — бесплатный, без VPN)
+GITHUB_MODELS_KEY = os.getenv("GITHUB_MODELS_KEY", "")
+GITHUB_MODELS_NAME = os.getenv("GITHUB_MODELS_NAME", "gpt-4o-mini")
 
 # Vision
 YOLO_MODEL = Path(os.getenv("YOLO_MODEL", "./models/yolov8n.pt"))

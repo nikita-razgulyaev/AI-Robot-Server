@@ -1,15 +1,17 @@
-"""Speech-to-Text модуль - Whisper через faster-whisper + Fuzzy matching"""
+"""Speech-to-Text модуль - Whisper (local) + Fuzzy matching"""
 import logging
 import tempfile
 import os
 from pathlib import Path
-from config.settings import WHISPER_MODEL_SIZE, WHISPER_DEVICE, WHISPER_COMPUTE_TYPE
+from config.settings import (
+    STT_MODE, WHISPER_MODEL_SIZE, WHISPER_DEVICE, WHISPER_COMPUTE_TYPE
+)
 
 logger = logging.getLogger(__name__)
 
 
-class STTEngine:
-    """Распознавание речи через faster-whisper с адаптивным fuzzy matching"""
+class LocalSTTEngine:
+    """Локальное распознавание речи через faster-whisper"""
 
     def __init__(self):
         self.model = None
@@ -42,20 +44,10 @@ class STTEngine:
             self.model = None
 
     def transcribe(self, audio_bytes: bytes) -> dict:
-        """
-        Распознаёт речь из PCM байтов с fuzzy correction
-
-        Args:
-            audio_bytes: PCM 16-bit mono 16kHz
-
-        Returns:
-            {"success": bool, "text": str, "corrected_text": str, "error": str}
-        """
         if self.model is None:
             return {"success": False, "text": "", "corrected_text": "", "error": "Модель не загружена"}
 
         try:
-            # Сохраняем во временный WAV
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                 import wave
                 with wave.open(tmp.name, 'wb') as wf:
@@ -74,15 +66,6 @@ class STTEngine:
             return {"success": False, "text": "", "corrected_text": "", "error": str(e)}
 
     def transcribe_from_file(self, audio_path: str) -> dict:
-        """
-        Распознаёт речь из WAV файла с fuzzy correction
-
-        Args:
-            audio_path: путь к WAV файлу (16-bit mono 16kHz)
-
-        Returns:
-            {"success": bool, "text": str, "corrected_text": str, "error": str}
-        """
         if self.model is None:
             return {"success": False, "text": "", "corrected_text": "", "error": "Модель не загружена"}
 
@@ -91,7 +74,6 @@ class STTEngine:
             text = " ".join([segment.text for segment in segments]).strip()
 
             if text:
-                # Применяем fuzzy correction
                 corrected_text = self.correct_text(text) if self.fuzzy_available else text
 
                 if corrected_text != text:
@@ -111,3 +93,26 @@ class STTEngine:
         except Exception as e:
             logger.error(f"Ошибка STT из файла: {e}")
             return {"success": False, "text": "", "corrected_text": "", "error": str(e)}
+
+
+class STTEngine:
+    """STT движок — только локальный (faster-whisper)"""
+
+    def __init__(self):
+        self.mode = STT_MODE
+        self.local_engine = LocalSTTEngine()
+        logger.info("💻 STT режим: ЛОКАЛЬНЫЙ (faster-whisper)")
+
+    def set_mode(self, mode: str):
+        """STT только локальный — облачные режимы недоступны без VPN"""
+        logger.warning("STT доступен только в локальном режиме (faster-whisper). Облачные STT API недоступны без VPN.")
+        self.mode = "local"
+
+    def get_mode(self) -> str:
+        return "local"
+
+    def transcribe(self, audio_bytes: bytes) -> dict:
+        return self.local_engine.transcribe(audio_bytes)
+
+    def transcribe_from_file(self, audio_path: str) -> dict:
+        return self.local_engine.transcribe_from_file(audio_path)
