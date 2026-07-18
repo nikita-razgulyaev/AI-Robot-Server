@@ -381,543 +381,637 @@ async def control_panel():
     return PANEL_HTML
 
 
-PANEL_HTML = """<!DOCTYPE html>
-<html>
+PANEL_HTML = """
+<!DOCTYPE html>
+<html lang="ru">
 <head>
-    <title>Soren Control Panel v3.0</title>
-    <meta charset="utf-8">
-    <style>
-        body { font-family: 'Segoe UI', Arial, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; max-width: 1400px; margin: 0 auto; }
-        h1 { color: #00d4ff; text-align: center; }
-        h2 { color: #00d4ff; font-size: 18px; margin-top: 0; }
-        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-        .section { background: #16213e; border-radius: 10px; padding: 20px; margin: 10px 0; }
-        .section-full { grid-column: 1 / -1; }
-        .servo-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }
-        .servo { background: #0f3460; padding: 8px; border-radius: 5px; text-align: center; font-size: 12px; }
-        .servo input { width: 100%; }
-        button { background: #00d4ff; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin: 5px; font-weight: bold; color: #000; }
-        button:hover { background: #0099cc; }
-        button.danger { background: #ff4444; color: #fff; }
-        button.success { background: #00ff88; color: #000; }
-        button.mic { background: #ff6b00; color: #fff; font-size: 18px; padding: 15px 30px; }
-        button.mic.recording { background: #ff0000; animation: pulse 1s infinite; }
-        button.mode-btn { font-size: 12px; padding: 8px 16px; }
-        button.mode-btn.active { background: #00ff88; color: #000; }
-        button.mode-btn.inactive { background: #444; color: #888; }
-        button.mode-btn:hover { opacity: 0.8; }
-        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
-        #log { background: #0a0a0a; padding: 10px; height: 250px; overflow-y: scroll; font-family: monospace; font-size: 12px; border-radius: 5px; }
-        .chat-container { display: flex; flex-direction: column; gap: 10px; }
-        .chat-input { display: flex; gap: 10px; }
-        .chat-input input { flex: 1; padding: 12px; border-radius: 5px; border: none; background: #0f3460; color: #fff; font-size: 14px; }
-        .message { padding: 10px; border-radius: 8px; margin: 5px 0; }
-        .message.user { background: #0f3460; }
-        .message.robot { background: #1a4a3e; }
-        .emotion-badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; margin-left: 10px; }
-        .emotion-calm { background: #4a90d9; }
-        .emotion-sad { background: #5a5a8a; }
-        .emotion-angry { background: #d94a4a; }
-        .emotion-loving { background: #d9a04a; }
-        .emotion-determined { background: #4ad94a; }
-        .emotion-surprised { background: #d94aff; }
-        .emotion-tired { background: #8a8a8a; }
-        .audio-controls { display: flex; align-items: center; gap: 15px; padding: 10px; background: #0f3460; border-radius: 8px; margin-bottom: 15px; flex-wrap: wrap; }
-        .audio-control-group { display: flex; align-items: center; gap: 10px; padding: 8px 15px; background: #0a1628; border-radius: 8px; border: 1px solid #1a3a5c; }
-        .audio-control-group label { font-size: 13px; color: #aaa; min-width: 120px; }
-        .toggle-switch { position: relative; display: inline-block; width: 60px; height: 30px; }
-        .toggle-switch input { opacity: 0; width: 0; height: 0; }
-        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ff4444; transition: .4s; border-radius: 30px; }
-        .slider:before { position: absolute; content: ""; height: 22px; width: 22px; left: 4px; bottom: 4px; background-color: white; transition: .4s; border-radius: 50%; }
-        input:checked + .slider { background-color: #00ff88; }
-        input:checked + .slider:before { transform: translateX(30px); }
-        .mode-robot { color: #ff4444; }
-        .mode-local { color: #00ff88; }
-        .voice-section { text-align: center; padding: 20px; }
-        .voice-status { font-size: 14px; color: #888; margin-top: 10px; min-height: 20px; }
-        .recording-indicator { display: none; color: #ff0000; font-weight: bold; }
-        .recording-indicator.active { display: inline; }
-        .audio-visualizer { width: 100%; height: 40px; background: #0a0a0a; border-radius: 5px; margin: 10px 0; display: none; }
-        .audio-visualizer.active { display: block; }
-        .mode-label { font-size: 12px; font-weight: bold; }
-        .ai-mode-panel { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
-        .ai-module { background: #0a1628; border: 1px solid #1a3a5c; border-radius: 8px; padding: 15px; text-align: center; }
-        .ai-module h3 { margin: 0 0 10px 0; color: #00d4ff; font-size: 16px; }
-        .ai-module .status { font-size: 13px; margin: 8px 0; font-weight: bold; }
-        .ai-module .status.cloud { color: #00ff88; }
-        .ai-module .status.local { color: #4a90d9; }
-        .ai-module .status.error { color: #ff4444; }
-        .ai-module .desc { font-size: 11px; color: #666; margin-top: 8px; }
-    </style>
+<meta charset="utf-8">
+<title>Soren — Instrument Panel</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Spectral:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0e130f;
+    --panel:#161c18;
+    --panel-alt:#1b2220;
+    --raised:#1f2723;
+    --border:#2a332c;
+    --border-soft:#212a24;
+    --text:#e8e5da;
+    --text-dim:#94a099;
+    --text-faint:#5c6961;
+    --amber:#d4a537;
+    --amber-soft:#8a6f2a;
+    --sage:#7a9b76;
+    --slate:#5f8fb0;
+    --rust:#b5533c;
+    --radius:3px;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:'IBM Plex Sans', sans-serif;
+    padding:28px; -webkit-font-smoothing:antialiased;
+  }
+  .wrap{ max-width:1360px; margin:0 auto; }
+
+  /* ===== NAMEPLATE ===== */
+  .nameplate{
+    display:flex; align-items:center; justify-content:space-between;
+    border:1px solid var(--border); border-radius:var(--radius);
+    padding:18px 24px; margin-bottom:22px;
+    background:linear-gradient(180deg, var(--panel-alt), var(--panel));
+    position:relative;
+  }
+  .nameplate::before{
+    content:""; position:absolute; inset:0; border-radius:var(--radius);
+    background:
+      linear-gradient(90deg, var(--amber-soft) 0%, transparent 2px) 0 0,
+      linear-gradient(90deg, var(--amber-soft) 0%, transparent 2px) 100% 0;
+    background-size: 2px 100%; background-repeat:no-repeat; opacity:.6;
+  }
+  .brand{ display:flex; align-items:center; gap:16px; }
+  .eye{ width:38px; height:38px; flex-shrink:0; }
+  .brand-text h1{
+    font-family:'Spectral', serif; font-weight:600; font-size:26px;
+    margin:0; letter-spacing:.5px; color:var(--text);
+  }
+  .brand-text .subtitle{
+    font-family:'IBM Plex Mono', monospace; font-size:10.5px;
+    letter-spacing:2px; color:var(--text-faint); text-transform:uppercase;
+    margin-top:3px;
+  }
+  .nameplate-meta{ display:flex; align-items:center; gap:28px; }
+  .meta-item{ text-align:right; }
+  .meta-item .label{
+    font-family:'IBM Plex Mono', monospace; font-size:9.5px; letter-spacing:1.5px;
+    color:var(--text-faint); text-transform:uppercase; display:block; margin-bottom:3px;
+  }
+  .meta-item .value{ font-family:'IBM Plex Mono', monospace; font-size:13px; }
+  .status-dot{ width:7px; height:7px; border-radius:50%; display:inline-block; margin-right:7px; background:var(--rust); box-shadow:0 0 6px var(--rust);}
+  .status-dot.online{ background:var(--sage); box-shadow:0 0 6px var(--sage); }
+
+  /* ===== SECTION FRAME ===== */
+  .section{
+    border:1px solid var(--border); border-radius:var(--radius);
+    background:var(--panel); padding:18px 20px; margin-bottom:16px;
+    position:relative;
+  }
+  .section-head{
+    display:flex; align-items:baseline; justify-content:space-between;
+    margin-bottom:14px; padding-bottom:10px; border-bottom:1px solid var(--border-soft);
+  }
+  .section-head h2{
+    font-family:'IBM Plex Mono', monospace; font-size:11.5px; font-weight:600;
+    letter-spacing:2px; text-transform:uppercase; color:var(--text-dim); margin:0;
+  }
+  .section-head .tag{
+    font-family:'IBM Plex Mono', monospace; font-size:10px; color:var(--text-faint);
+  }
+  .row2{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+
+  /* ===== AI CORE — segmented controls ===== */
+  .core-grid{ display:grid; grid-template-columns:repeat(3, 1fr); gap:14px; }
+  .core-card{
+    border:1px solid var(--border-soft); border-radius:var(--radius); background:var(--panel-alt);
+    padding:14px 16px;
+  }
+  .core-card .name{ font-size:13.5px; font-weight:600; margin-bottom:2px; }
+  .core-card .desc{ font-size:11px; color:var(--text-faint); margin-bottom:12px; line-height:1.5; }
+  .segmented{
+    display:flex; border:1px solid var(--border); border-radius:var(--radius); overflow:hidden;
+    font-family:'IBM Plex Mono', monospace; font-size:11.5px;
+  }
+  .segmented button{
+    flex:1; border:none; background:transparent; color:var(--text-faint);
+    padding:8px 6px; cursor:pointer; letter-spacing:.5px; transition:.15s;
+  }
+  .segmented button:first-child{ border-right:1px solid var(--border); }
+  .segmented button.active.local{ background:rgba(122,155,118,.16); color:var(--sage); }
+  .segmented button.active.cloud{ background:rgba(95,143,176,.16); color:var(--slate); }
+  .segmented button:hover:not(.active){ color:var(--text-dim); background:var(--raised); }
+  .core-note{ font-size:10.5px; color:var(--text-faint); margin-top:14px; text-align:center; border-top:1px solid var(--border-soft); padding-top:10px; }
+
+  /* ===== AUDIO ROUTING ===== */
+  .audio-grid{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .audio-row{
+    display:flex; align-items:center; justify-content:space-between; gap:14px;
+    border:1px solid var(--border-soft); border-radius:var(--radius); background:var(--panel-alt);
+    padding:12px 16px;
+  }
+  .audio-row .label{ font-size:12.5px; color:var(--text-dim); }
+  .audio-state{ font-family:'IBM Plex Mono', monospace; font-size:11px; }
+  .switch{ position:relative; width:46px; height:24px; flex-shrink:0; }
+  .switch input{ opacity:0; width:0; height:0; }
+  .switch .track{
+    position:absolute; inset:0; background:var(--raised); border:1px solid var(--border);
+    border-radius:20px; transition:.2s; cursor:pointer;
+  }
+  .switch .track::before{
+    content:""; position:absolute; width:16px; height:16px; left:3px; top:2.5px;
+    background:var(--text-faint); border-radius:50%; transition:.2s;
+  }
+  .switch input:checked + .track{ background:rgba(95,143,176,.16); border-color:var(--slate); }
+  .switch input:checked + .track::before{ transform:translateX(21px); background:var(--slate); }
+
+  /* ===== VOICE ===== */
+  .voice-panel{ display:flex; align-items:center; gap:22px; padding:6px 4px; }
+  .mic-btn{
+    width:64px; height:64px; border-radius:50%; flex-shrink:0;
+    border:1.5px solid var(--amber-soft); background:var(--panel-alt); color:var(--amber);
+    cursor:pointer; display:flex; align-items:center; justify-content:center; transition:.2s;
+  }
+  .mic-btn:hover{ border-color:var(--amber); }
+  .mic-btn.recording{ background:rgba(181,83,60,.15); border-color:var(--rust); color:var(--rust); animation:breathe 1.4s infinite; }
+  @keyframes breathe{ 0%,100%{ box-shadow:0 0 0 0 rgba(181,83,60,.35);} 50%{ box-shadow:0 0 0 8px rgba(181,83,60,0);} }
+  .voice-info{ flex:1; }
+  .voice-status{ font-size:12.5px; color:var(--text-dim); margin-bottom:8px; }
+  .voice-status .rec{ color:var(--rust); font-family:'IBM Plex Mono', monospace; margin-left:8px; display:none; }
+  .voice-status .rec.active{ display:inline; }
+  canvas.visualizer{ width:100%; height:34px; background:var(--panel-alt); border:1px solid var(--border-soft); border-radius:var(--radius); display:none; }
+  canvas.visualizer.active{ display:block; }
+
+  /* ===== CHAT ===== */
+  .chat-log{ max-height:260px; overflow-y:auto; display:flex; flex-direction:column; gap:8px; margin-bottom:12px; padding-right:4px; }
+  .msg{ font-size:12.5px; line-height:1.5; padding:9px 12px; border-radius:var(--radius); border:1px solid var(--border-soft); }
+  .msg.user{ background:var(--panel-alt); }
+  .msg.robot{ background:rgba(212,165,55,.06); border-color:rgba(212,165,55,.2); }
+  .msg .who{ font-family:'IBM Plex Mono', monospace; font-size:10px; letter-spacing:1px; color:var(--text-faint); text-transform:uppercase; display:block; margin-bottom:3px; }
+  .emotion-tag{ display:inline-block; font-family:'IBM Plex Mono', monospace; font-size:9.5px; letter-spacing:1px; text-transform:uppercase; padding:1px 7px; border-radius:10px; margin-left:8px; border:1px solid; }
+  .em-calm{ color:#7fa8c9; border-color:#7fa8c9; }
+  .em-sad{ color:#8686b0; border-color:#8686b0; }
+  .em-angry{ color:var(--rust); border-color:var(--rust); }
+  .em-loving{ color:#d9a04a; border-color:#d9a04a; }
+  .em-determined{ color:var(--sage); border-color:var(--sage); }
+  .em-surprised{ color:#c17fd9; border-color:#c17fd9; }
+  .em-tired{ color:var(--text-faint); border-color:var(--text-faint); }
+  .chat-input-row{ display:flex; gap:8px; }
+  input[type=text]{
+    flex:1; background:var(--panel-alt); border:1px solid var(--border); color:var(--text);
+    padding:10px 12px; border-radius:var(--radius); font-family:'IBM Plex Sans', sans-serif; font-size:13px;
+  }
+  input[type=text]:focus{ outline:none; border-color:var(--amber-soft); }
+
+  button.btn{
+    background:transparent; border:1px solid var(--border); color:var(--text-dim);
+    padding:9px 16px; border-radius:var(--radius); cursor:pointer; font-size:12px;
+    font-family:'IBM Plex Sans', sans-serif; font-weight:500; transition:.15s;
+  }
+  button.btn:hover{ border-color:var(--amber-soft); color:var(--text); }
+  button.btn.primary{ border-color:var(--amber-soft); color:var(--amber); }
+  button.btn.primary:hover{ background:rgba(212,165,55,.08); }
+  button.btn.danger{ border-color:rgba(181,83,60,.5); color:var(--rust); }
+  button.btn.danger:hover{ background:rgba(181,83,60,.08); }
+
+  .gesture-grid{ display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:14px; }
+
+  /* ===== SERVOS ===== */
+  .servo-block-label{
+    font-family:'IBM Plex Mono', monospace; font-size:10px; letter-spacing:1.5px; color:var(--text-faint);
+    text-transform:uppercase; margin:14px 0 8px; padding-bottom:6px; border-bottom:1px solid var(--border-soft);
+  }
+  .servo-block-label:first-child{ margin-top:0; }
+  .servo-grid{ display:grid; grid-template-columns:repeat(8, 1fr); gap:8px; }
+  .servo{
+    border:1px solid var(--border-soft); background:var(--panel-alt); border-radius:var(--radius);
+    padding:8px 6px; text-align:center;
+  }
+  .servo .ch{ font-family:'IBM Plex Mono', monospace; font-size:9.5px; color:var(--text-faint); letter-spacing:.5px; }
+  .servo .deg{ font-family:'IBM Plex Mono', monospace; font-size:13px; color:var(--amber); margin:3px 0; }
+  .servo input[type=range]{ width:100%; accent-color:var(--amber); height:14px; }
+  .servo-actions{ display:flex; gap:8px; margin-top:14px; }
+
+  /* ===== LOG ===== */
+  .log{
+    background:#0a0e0b; border:1px solid var(--border-soft); border-radius:var(--radius);
+    height:200px; overflow-y:auto; padding:10px 12px;
+    font-family:'IBM Plex Mono', monospace; font-size:11px; line-height:1.7; color:#8fa397;
+  }
+  .log::-webkit-scrollbar, .chat-log::-webkit-scrollbar{ width:6px; }
+  .log::-webkit-scrollbar-thumb, .chat-log::-webkit-scrollbar-thumb{ background:var(--border); border-radius:3px; }
+
+  @media (max-width: 860px){
+    .core-grid{ grid-template-columns:1fr; }
+    .audio-grid{ grid-template-columns:1fr; }
+    .row2{ grid-template-columns:1fr; }
+    .servo-grid{ grid-template-columns:repeat(4,1fr); }
+    .nameplate{ flex-direction:column; align-items:flex-start; gap:14px; }
+    .nameplate-meta{ gap:18px; }
+  }
+</style>
 </head>
 <body>
-    <h1>🦉 Soren Control Panel v3.0</h1>
+<div class="wrap">
 
-    <!-- Режимы AI модулей -->
-    <div class="section section-full">
-        <h2>🧠 Режимы AI модулей (Local / Cloud)</h2>
-        <div class="ai-mode-panel" id="ai-mode-panel">
-            <div class="ai-module">
-                <h3>🎤 STT — Распознавание речи</h3>
-                <div class="status" id="stt-status">Загрузка...</div>
-                <button class="mode-btn" id="stt-local-btn" onclick="setAIMode('stt', 'local')">💻 Локально</button>
-                <button class="mode-btn" id="stt-cloud-btn" onclick="setAIMode('stt', 'cloud')">☁️ Облако</button>
-                <div class="desc">Локально: faster-whisper (~500MB)<br>Облако: недоступно (нужен VPN)</div>
-            </div>
-            <div class="ai-module">
-                <h3>🧠 LLM — Языковая модель</h3>
-                <div class="status" id="llm-status">Загрузка...</div>
-                <button class="mode-btn" id="llm-local-btn" onclick="setAIMode('llm', 'local')">💻 Локально</button>
-                <button class="mode-btn" id="llm-cloud-btn" onclick="setAIMode('llm', 'cloud')">☁️ Облако</button>
-                <div class="desc">Локально: Qwen 7B (~4.5GB)<br>Облако: GitHub Models</div>
-            </div>
-            <div class="ai-module">
-                <h3>🔊 TTS — Синтез речи</h3>
-                <div class="status" id="tts-status">Загрузка...</div>
-                <button class="mode-btn" id="tts-local-btn" onclick="setAIMode('tts', 'local')">💻 Локально</button>
-                <button class="mode-btn" id="tts-cloud-btn" onclick="setAIMode('tts', 'cloud')">☁️ Облако</button>
-                <div class="desc">Локально: Silero (~120MB)<br>Облако: FreeTTS (edge-tts)</div>
-            </div>
-        </div>
-        <div style="font-size: 12px; color: #888; margin-top: 12px; text-align: center;">
-            ⚠️ Для облачного LLM нужен <b>GITHUB_MODELS_KEY</b> (токен GitHub)
-        </div>
+  <!-- NAMEPLATE -->
+  <div class="nameplate">
+    <div class="brand">
+      <svg class="eye" viewBox="0 0 40 40" fill="none">
+        <circle cx="20" cy="20" r="18.5" stroke="#8a6f2a" stroke-width="1.2"/>
+        <circle cx="20" cy="20" r="11" stroke="#d4a537" stroke-width="1.4"/>
+        <circle cx="20" cy="20" r="4.2" fill="#d4a537"/>
+      </svg>
+      <div class="brand-text">
+        <h1>Сорен</h1>
+        <div class="subtitle">Strigiformes Companion Unit · Server v3.0</div>
+      </div>
     </div>
+    <div class="nameplate-meta">
+      <div class="meta-item">
+        <span class="label">Connections</span>
+        <span class="value" id="conn-count">0</span>
+      </div>
+      <div class="meta-item">
+        <span class="label">Link</span>
+        <span class="value"><span class="status-dot" id="status-dot"></span><span id="status-text">OFFLINE</span></span>
+      </div>
+    </div>
+  </div>
 
-    <!-- Режимы аудио -->
-    <div class="section section-full">
-        <h2>🔊 Режимы аудио (Robot / Local)</h2>
-        <div class="audio-controls">
-            <div class="audio-control-group">
-                <label>🎤 <b>Ввод звука:</b></label>
-                <label class="toggle-switch">
-                    <input type="checkbox" id="audio-input-toggle" onchange="toggleAudioInputMode()">
-                    <span class="slider"></span>
-                </label>
-                <span id="audio-input-mode-text" class="mode-robot mode-label">🔊 Робот (ESP32 микрофон)</span>
-            </div>
-            <div class="audio-control-group">
-                <label>🔊 <b>Вывод звука:</b></label>
-                <label class="toggle-switch">
-                    <input type="checkbox" id="audio-output-toggle" onchange="toggleAudioOutputMode()">
-                    <span class="slider"></span>
-                </label>
-                <span id="audio-output-mode-text" class="mode-robot mode-label">🔊 Робот (ESP32 динамик)</span>
-            </div>
-            <span id="connection-status" style="margin-left: auto; font-size: 14px;">● OFFLINE</span>
+  <!-- AI CORE -->
+  <div class="section">
+    <div class="section-head">
+      <h2>AI Core — Обработка</h2>
+      <span class="tag">STT / LLM / TTS</span>
+    </div>
+    <div class="core-grid" id="ai-mode-panel">
+      <div class="core-card">
+        <div class="name">Распознавание речи</div>
+        <div class="desc">Локально: faster-whisper (~500 МБ)<br>Облако: OpenAI Whisper API</div>
+        <div class="segmented">
+          <button id="stt-local-btn" onclick="setAIMode('stt','local')">Локально</button>
+          <button id="stt-cloud-btn" onclick="setAIMode('stt','cloud')">Облако</button>
         </div>
-    </div>
-
-    <!-- Голосовое общение -->
-    <div class="section section-full">
-        <h2>🎤 Голосовое общение с Сореном</h2>
-        <div class="voice-section">
-            <button id="mic-btn" class="mic" onclick="toggleRecording()">🎤 Нажми и говори</button>
-            <div class="voice-status">
-                <span id="voice-status-text">Нажмите кнопку микрофона и говорите</span>
-                <span id="recording-indicator" class="recording-indicator"> 🔴 ЗАПИСЬ</span>
-            </div>
-            <canvas id="audio-visualizer" class="audio-visualizer"></canvas>
+      </div>
+      <div class="core-card">
+        <div class="name">Языковая модель</div>
+        <div class="desc">Локально: Qwen 7B GGUF (~4.5 ГБ)<br>Облако: GPT-4o-mini</div>
+        <div class="segmented">
+          <button id="llm-local-btn" onclick="setAIMode('llm','local')">Локально</button>
+          <button id="llm-cloud-btn" onclick="setAIMode('llm','cloud')">Облако</button>
         </div>
-    </div>
-
-    <!-- Чат -->
-    <div class="grid">
-        <div class="section">
-            <h2>💬 Чат с Сореном</h2>
-            <div class="chat-container">
-                <div id="chat-history" style="max-height: 300px; overflow-y: auto;"></div>
-                <div class="chat-input">
-                    <input type="text" id="chat-input" placeholder="Напиши Сорену..." onkeypress="if(event.key==='Enter') sendChat()">
-                    <button onclick="sendChat()">Отправить</button>
-                </div>
-            </div>
+      </div>
+      <div class="core-card">
+        <div class="name">Синтез речи</div>
+        <div class="desc">Локально: Silero (~120 МБ)<br>Облако: OpenAI TTS API</div>
+        <div class="segmented">
+          <button id="tts-local-btn" onclick="setAIMode('tts','local')">Локально</button>
+          <button id="tts-cloud-btn" onclick="setAIMode('tts','cloud')">Облако</button>
         </div>
-        <div class="section">
-            <h2>🎬 Анимации</h2>
-            <button onclick="sendCmd({type:'animation',name:'wave'})">👋 Помахать</button>
-            <button onclick="sendCmd({type:'animation',name:'nod'})">🙂 Кивнуть</button>
-            <button onclick="sendCmd({type:'animation',name:'shake_head'})">😕 Качнуть</button>
-            <button onclick="sendCmd({type:'animation',name:'idle'})">😶 Покой</button>
-            <br><br>
-            <button onclick="sendCmd({type:'clear_history'})" class="danger">🗑 Очистить историю</button>
+      </div>
+    </div>
+    <div class="core-note">Для облачных режимов требуется ключ API в .env — см. README</div>
+  </div>
+
+  <!-- AUDIO ROUTING -->
+  <div class="section">
+    <div class="section-head">
+      <h2>Маршрутизация звука</h2>
+      <span class="tag">Robot / Local</span>
+    </div>
+    <div class="audio-grid">
+      <div class="audio-row">
+        <span class="label">Микрофон (ввод)</span>
+        <span class="audio-state" id="audio-input-mode-text">Робот · ESP32</span>
+        <label class="switch">
+          <input type="checkbox" id="audio-input-toggle" onchange="toggleAudioInputMode()">
+          <span class="track"></span>
+        </label>
+      </div>
+      <div class="audio-row">
+        <span class="label">Динамик (вывод)</span>
+        <span class="audio-state" id="audio-output-mode-text">Робот · ESP32</span>
+        <label class="switch">
+          <input type="checkbox" id="audio-output-toggle" onchange="toggleAudioOutputMode()">
+          <span class="track"></span>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <!-- VOICE -->
+  <div class="section">
+    <div class="section-head"><h2>Голосовое общение</h2></div>
+    <div class="voice-panel">
+      <button id="mic-btn" class="mic-btn" onclick="toggleRecording()">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z"/><path d="M19 11a7 7 0 0 1-14 0M12 19v3"/></svg>
+      </button>
+      <div class="voice-info">
+        <div class="voice-status">
+          <span id="voice-status-text">Нажмите и говорите</span>
+          <span id="recording-indicator" class="rec">● Запись</span>
         </div>
+        <canvas id="audio-visualizer" class="visualizer"></canvas>
+      </div>
     </div>
+  </div>
 
-    <!-- Сервоприводы -->
-    <div class="section section-full">
-        <h2>🦾 Сервоприводы (18 шт)</h2>
-        <div class="servo-grid" id="servo-grid"></div>
-        <br>
-        <button onclick="setAllServos()">Применить все</button>
-        <button onclick="resetServos()">Сбросить в 90°</button>
+  <!-- CHAT + GESTURES -->
+  <div class="row2">
+    <div class="section">
+      <div class="section-head"><h2>Текстовый чат</h2></div>
+      <div class="chat-log" id="chat-history"></div>
+      <div class="chat-input-row">
+        <input type="text" id="chat-input" placeholder="Напишите Сорену…" onkeypress="if(event.key==='Enter') sendChat()">
+        <button class="btn primary" onclick="sendChat()">Отправить</button>
+      </div>
     </div>
-
-    <!-- Лог -->
-    <div class="section section-full">
-        <h2>📋 Лог</h2>
-        <div id="log"></div>
+    <div class="section">
+      <div class="section-head"><h2>Жесты</h2></div>
+      <div class="gesture-grid">
+        <button class="btn" onclick="sendCmd({type:'animation',name:'wave'})">Помахать</button>
+        <button class="btn" onclick="sendCmd({type:'animation',name:'nod'})">Кивнуть</button>
+        <button class="btn" onclick="sendCmd({type:'animation',name:'shake_head'})">Качнуть головой</button>
+        <button class="btn" onclick="sendCmd({type:'animation',name:'idle'})">Покой</button>
+      </div>
+      <button class="btn danger" onclick="sendCmd({type:'clear_history'})">Очистить историю диалога</button>
     </div>
+  </div>
 
-    <audio id="audio-player" style="display:none;"></audio>
+  <!-- SERVOS -->
+  <div class="section">
+    <div class="section-head">
+      <h2>Сервоприводы</h2>
+      <span class="tag">18 каналов</span>
+    </div>
+    <div class="servo-block-label">PCA9685 · Каналы 0–15</div>
+    <div class="servo-grid" id="servo-grid-main"></div>
+    <div class="servo-block-label">Прямое подключение · Каналы 16–17</div>
+    <div class="servo-grid" id="servo-grid-direct" style="grid-template-columns:repeat(8,1fr);"></div>
+    <div class="servo-actions">
+      <button class="btn primary" onclick="setAllServos()">Применить все</button>
+      <button class="btn" onclick="resetServos()">Сбросить в 90°</button>
+    </div>
+  </div>
 
-    <script>
-        const ws = new WebSocket(`ws://${window.location.host}/ws`);
-        let audioInputMode = 'robot';
-        let audioOutputMode = 'robot';
-        let aiModes = { stt: 'local', tts: 'local', llm: 'local' };
+  <!-- LOG -->
+  <div class="section">
+    <div class="section-head"><h2>Системный журнал</h2></div>
+    <div class="log" id="log"></div>
+  </div>
 
-        ws.onopen = () => {
-            document.getElementById('connection-status').textContent = '● ONLINE';
-            document.getElementById('connection-status').style.color = '#00ff88';
-            log('WebSocket подключен');
-            ws.send(JSON.stringify({type: 'audio_mode'}));
-            ws.send(JSON.stringify({type: 'ai_mode'}));
+  <audio id="audio-player" style="display:none;"></audio>
+</div>
+
+<script>
+  const ws = new WebSocket(`ws://${window.location.host}/ws`);
+  let audioInputMode = 'robot';
+  let audioOutputMode = 'robot';
+  let aiModes = { stt: 'local', tts: 'local', llm: 'local' };
+
+  ws.onopen = () => {
+    document.getElementById('status-dot').classList.add('online');
+    document.getElementById('status-text').textContent = 'ONLINE';
+    log('WebSocket подключен');
+    ws.send(JSON.stringify({type:'audio_mode'}));
+    ws.send(JSON.stringify({type:'ai_mode'}));
+  };
+  ws.onclose = () => {
+    document.getElementById('status-dot').classList.remove('online');
+    document.getElementById('status-text').textContent = 'OFFLINE';
+    log('WebSocket отключен');
+  };
+  ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    log('← ' + JSON.stringify(data));
+    if (data.angles) updateServoDisplay(data.angles);
+    if (data.emotion) log('Эмоция: ' + data.emotion);
+    if (data.type === 'audio_mode') {
+      if (data.input_mode) audioInputMode = data.input_mode;
+      if (data.output_mode) audioOutputMode = data.output_mode;
+      updateAudioModeUI();
+    }
+    if (data.type === 'ai_mode' && data.modes) { aiModes = data.modes; updateAIModeUI(); }
+    if (data.modes && !data.type) { aiModes = data.modes; updateAIModeUI(); }
+  };
+
+  async function setAIMode(module, mode) {
+    log(`Переключение ${module.toUpperCase()} → ${mode}…`);
+    const fd = new FormData(); fd.append('module', module); fd.append('mode', mode);
+    try {
+      const r = await fetch('/ai_mode', {method:'POST', body:fd});
+      const data = await r.json();
+      if (data.status === 'ok') {
+        if (data.modes) { aiModes = data.modes; updateAIModeUI(); }
+        log(`${module.toUpperCase()} → ${mode} ✓`);
+      } else {
+        log('Ошибка: ' + (data.message || 'неизвестная'));
+        if (data.modes) { aiModes = data.modes; updateAIModeUI(); }
+      }
+    } catch(e) { log('Сетевая ошибка: ' + e.message); }
+  }
+
+  function updateAIModeUI() {
+    ['stt','llm','tts'].forEach(mod => {
+      const mode = aiModes[mod] || 'local';
+      const localBtn = document.getElementById(mod+'-local-btn');
+      const cloudBtn = document.getElementById(mod+'-cloud-btn');
+      if (localBtn) localBtn.className = mode === 'local' ? 'active local' : '';
+      if (cloudBtn) cloudBtn.className = mode === 'cloud' ? 'active cloud' : '';
+    });
+  }
+
+  async function toggleAudioInputMode() {
+    const t = document.getElementById('audio-input-toggle');
+    const newMode = t.checked ? 'local' : 'robot';
+    const fd = new FormData(); fd.append('mode', newMode); fd.append('type', 'input');
+    const r = await fetch('/audio_mode', {method:'POST', body:fd});
+    const data = await r.json();
+    if (data.status === 'ok') { audioInputMode = data.audio_input_mode; updateAudioModeUI(); }
+  }
+  async function toggleAudioOutputMode() {
+    const t = document.getElementById('audio-output-toggle');
+    const newMode = t.checked ? 'local' : 'robot';
+    const fd = new FormData(); fd.append('mode', newMode); fd.append('type', 'output');
+    const r = await fetch('/audio_mode', {method:'POST', body:fd});
+    const data = await r.json();
+    if (data.status === 'ok') { audioOutputMode = data.audio_output_mode; updateAudioModeUI(); }
+  }
+  function updateAudioModeUI() {
+    const it = document.getElementById('audio-input-toggle');
+    const itx = document.getElementById('audio-input-mode-text');
+    it.checked = (audioInputMode === 'local');
+    itx.textContent = audioInputMode === 'local' ? 'Локально · микрофон ПК' : 'Робот · ESP32';
+    const ot = document.getElementById('audio-output-toggle');
+    const otx = document.getElementById('audio-output-mode-text');
+    ot.checked = (audioOutputMode === 'local');
+    otx.textContent = audioOutputMode === 'local' ? 'Локально · наушники ПК' : 'Робот · ESP32';
+  }
+
+  let mediaRecorder=null, audioChunks=[], isRecording=false, audioContext=null, analyser=null, visCanvas=null, visCtx=null;
+
+  async function toggleRecording() {
+    const btn = document.getElementById('mic-btn');
+    const statusText = document.getElementById('voice-status-text');
+    const indicator = document.getElementById('recording-indicator');
+    const visualizer = document.getElementById('audio-visualizer');
+    if (!isRecording) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+        mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+        mediaRecorder.onstop = async () => {
+          const blob = new Blob(audioChunks, {type:'audio/wav'});
+          await sendVoiceToServer(blob);
+          stream.getTracks().forEach(t => t.stop());
         };
+        mediaRecorder.start();
+        isRecording = true;
+        btn.classList.add('recording');
+        statusText.textContent = 'Идёт запись…';
+        indicator.classList.add('active');
+        visualizer.classList.add('active');
+        setupVisualizer(stream);
+        log('Начало записи голоса');
+      } catch(err) {
+        log('Ошибка доступа к микрофону: ' + err.message);
+        alert('Разрешите доступ к микрофону в настройках браузера');
+      }
+    } else {
+      mediaRecorder.stop();
+      isRecording = false;
+      btn.classList.remove('recording');
+      statusText.textContent = 'Обработка…';
+      indicator.classList.remove('active');
+      visualizer.classList.remove('active');
+      log('Конец записи, отправка…');
+    }
+  }
 
-        ws.onclose = () => {
-            document.getElementById('connection-status').textContent = '● OFFLINE';
-            document.getElementById('connection-status').style.color = '#ff4444';
-            log('WebSocket отключен');
-        };
+  function setupVisualizer(stream) {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioContext.createAnalyser();
+    const source = audioContext.createMediaStreamSource(stream);
+    source.connect(analyser);
+    analyser.fftSize = 256;
+    visCanvas = document.getElementById('audio-visualizer');
+    visCtx = visCanvas.getContext('2d');
+    visCanvas.width = visCanvas.offsetWidth;
+    visCanvas.height = visCanvas.offsetHeight;
+    drawVisualizer();
+  }
+  function drawVisualizer() {
+    if (!isRecording || !analyser) return;
+    requestAnimationFrame(drawVisualizer);
+    const bufferLength = analyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+    analyser.getByteFrequencyData(dataArray);
+    visCtx.fillStyle = '#0a0e0b';
+    visCtx.fillRect(0,0,visCanvas.width, visCanvas.height);
+    const barWidth = (visCanvas.width / bufferLength) * 2.5;
+    let x = 0;
+    for (let i=0;i<bufferLength;i++){
+      const barHeight = dataArray[i] / 3;
+      visCtx.fillStyle = '#d4a537';
+      visCtx.fillRect(x, visCanvas.height - barHeight, barWidth, barHeight);
+      x += barWidth + 1;
+    }
+  }
 
-        ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            log('← ' + JSON.stringify(data));
-            if (data.angles) updateServoDisplay(data.angles);
-            if (data.emotion) log('Эмоция: ' + data.emotion);
-            if (data.type === 'audio_mode') {
-                if (data.input_mode) audioInputMode = data.input_mode;
-                if (data.output_mode) audioOutputMode = data.output_mode;
-                updateAudioModeUI();
-            }
-            if (data.type === 'ai_mode' && data.modes) {
-                aiModes = data.modes;
-                updateAIModeUI();
-            }
-            if (data.modes && !data.type) {
-                aiModes = data.modes;
-                updateAIModeUI();
-            }
-        };
+  async function sendVoiceToServer(blob) {
+    const statusText = document.getElementById('voice-status-text');
+    statusText.textContent = 'Отправка на сервер…';
+    const fd = new FormData();
+    fd.append('audio', blob, 'voice.wav');
+    fd.append('audio_output_mode_param', audioOutputMode);
+    try {
+      const r = await fetch('/voice', {method:'POST', body:fd});
+      const data = await r.json();
+      if (data.status === 'ok') {
+        addMessage('user', data.user_text);
+        addMessage('robot', data.response, data.emotion);
+        if (audioOutputMode === 'local' && data.audio_base64) playAudio(data.audio_base64);
+        if (data.ai_modes) { aiModes = data.ai_modes; updateAIModeUI(); }
+        statusText.textContent = 'Готово — нажмите для новой записи';
+      } else {
+        addMessage('robot', 'Ошибка: ' + (data.message || 'неизвестная'));
+        statusText.textContent = 'Ошибка: ' + data.message;
+      }
+    } catch(e) { log('Ошибка сети: ' + e); statusText.textContent = 'Ошибка сети'; }
+  }
 
-        // ===== AI MODE SWITCHING =====
-        async function setAIMode(module, mode) {
-            log(`🧠 Переключение ${module.toUpperCase()} → ${mode}...`);
-            const formData = new FormData();
-            formData.append('module', module);
-            formData.append('mode', mode);
+  async function sendChat() {
+    const input = document.getElementById('chat-input');
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    addMessage('user', text);
+    if (audioOutputMode === 'robot') sendCmd({type:'text', text:text});
+    else await sendLocal(text);
+  }
+  async function sendLocal(text) {
+    try {
+      const fd = new FormData(); fd.append('text', text);
+      const r = await fetch('/speak', {method:'POST', body:fd});
+      const data = await r.json();
+      if (data.status === 'ok') {
+        addMessage('robot', data.response, data.emotion);
+        if (data.audio_base64) playAudio(data.audio_base64);
+        if (data.ai_modes) { aiModes = data.ai_modes; updateAIModeUI(); }
+      } else addMessage('robot', 'Ошибка: ' + (data.message || 'неизвестная'));
+    } catch(e) { log('Ошибка сети: ' + e); }
+  }
+  function playAudio(b64) {
+    const audio = document.getElementById('audio-player');
+    audio.src = 'data:audio/wav;base64,' + b64;
+    audio.play().catch(e => log('Ошибка воспроизведения: ' + e.message));
+  }
+  function addMessage(sender, text, emotion) {
+    const chat = document.getElementById('chat-history');
+    const div = document.createElement('div');
+    div.className = 'msg ' + sender;
+    const who = sender === 'user' ? 'Вы' : 'Сорен';
+    let emTag = '';
+    if (emotion) emTag = `<span class="emotion-tag em-${emotion}">${emotion}</span>`;
+    div.innerHTML = `<span class="who">${who}</span>${text}${emTag}`;
+    chat.appendChild(div);
+    chat.scrollTop = chat.scrollHeight;
+  }
+  function sendCmd(cmd) { ws.send(JSON.stringify(cmd)); log('→ ' + JSON.stringify(cmd)); }
+  function log(msg) {
+    const el = document.getElementById('log');
+    el.innerHTML += `<div>[${new Date().toLocaleTimeString()}] ${msg}</div>`;
+    el.scrollTop = el.scrollHeight;
+  }
 
-            try {
-                const response = await fetch('/ai_mode', {method: 'POST', body: formData});
-                const data = await response.json();
-                if (data.status === 'ok') {
-                    if (data.modes) {
-                        aiModes = data.modes;
-                        updateAIModeUI();
-                    }
-                    log(`✅ ${module.toUpperCase()} переключён на ${mode}`);
-                } else {
-                    log('❌ Ошибка: ' + (data.message || 'Неизвестная'));
-                    // Обновим UI на случай если сервер вернул текущие режимы
-                    if (data.modes) {
-                        aiModes = data.modes;
-                        updateAIModeUI();
-                    }
-                }
-            } catch (e) {
-                log('❌ Сетевая ошибка: ' + e.message);
-            }
-        }
-
-        function updateAIModeUI() {
-            const modules = ['stt', 'llm', 'tts'];
-            modules.forEach(mod => {
-                const mode = aiModes[mod] || 'local';
-                const statusEl = document.getElementById(mod + '-status');
-                const localBtn = document.getElementById(mod + '-local-btn');
-                const cloudBtn = document.getElementById(mod + '-cloud-btn');
-
-                if (statusEl) {
-                    if (mode === 'cloud') {
-                        statusEl.textContent = '☁️ Облачный';
-                        statusEl.className = 'status cloud';
-                    } else {
-                        statusEl.textContent = '💻 Локальный';
-                        statusEl.className = 'status local';
-                    }
-                }
-                if (localBtn) {
-                    localBtn.className = 'mode-btn ' + (mode === 'local' ? 'active' : 'inactive');
-                }
-                if (cloudBtn) {
-                    cloudBtn.className = 'mode-btn ' + (mode === 'cloud' ? 'active' : 'inactive');
-                }
-            });
-        }
-
-        // ===== AUDIO MODES =====
-        async function toggleAudioInputMode() {
-            const toggle = document.getElementById('audio-input-toggle');
-            const newMode = toggle.checked ? 'local' : 'robot';
-            const formData = new FormData();
-            formData.append('mode', newMode);
-            formData.append('type', 'input');
-            const response = await fetch('/audio_mode', {method: 'POST', body: formData});
-            const data = await response.json();
-            if (data.status === 'ok') {
-                audioInputMode = data.audio_input_mode;
-                updateAudioModeUI();
-            }
-        }
-
-        async function toggleAudioOutputMode() {
-            const toggle = document.getElementById('audio-output-toggle');
-            const newMode = toggle.checked ? 'local' : 'robot';
-            const formData = new FormData();
-            formData.append('mode', newMode);
-            formData.append('type', 'output');
-            const response = await fetch('/audio_mode', {method: 'POST', body: formData});
-            const data = await response.json();
-            if (data.status === 'ok') {
-                audioOutputMode = data.audio_output_mode;
-                updateAudioModeUI();
-            }
-        }
-
-        function updateAudioModeUI() {
-            const inputToggle = document.getElementById('audio-input-toggle');
-            const inputText = document.getElementById('audio-input-mode-text');
-            inputToggle.checked = (audioInputMode === 'local');
-            if (audioInputMode === 'local') {
-                inputText.textContent = '🎧 Локально (микрофон ПК)';
-                inputText.className = 'mode-local mode-label';
-            } else {
-                inputText.textContent = '🔊 Робот (ESP32 микрофон)';
-                inputText.className = 'mode-robot mode-label';
-            }
-
-            const outputToggle = document.getElementById('audio-output-toggle');
-            const outputText = document.getElementById('audio-output-mode-text');
-            outputToggle.checked = (audioOutputMode === 'local');
-            if (audioOutputMode === 'local') {
-                outputText.textContent = '🎧 Локально (наушники ПК)';
-                outputText.className = 'mode-local mode-label';
-            } else {
-                outputText.textContent = '🔊 Робот (ESP32 динамик)';
-                outputText.className = 'mode-robot mode-label';
-            }
-        }
-
-        // ===== VOICE =====
-        let mediaRecorder = null;
-        let audioChunks = [];
-        let isRecording = false;
-        let audioContext = null;
-        let analyser = null;
-        let visualizerCanvas = null;
-        let visualizerCtx = null;
-
-        async function toggleRecording() {
-            const btn = document.getElementById('mic-btn');
-            const statusText = document.getElementById('voice-status-text');
-            const indicator = document.getElementById('recording-indicator');
-            const visualizer = document.getElementById('audio-visualizer');
-
-            if (!isRecording) {
-                try {
-                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                    mediaRecorder = new MediaRecorder(stream);
-                    audioChunks = [];
-                    mediaRecorder.ondataavailable = (e) => { audioChunks.push(e.data); };
-                    mediaRecorder.onstop = async () => {
-                        const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-                        await sendVoiceToServer(audioBlob);
-                        stream.getTracks().forEach(track => track.stop());
-                    };
-                    mediaRecorder.start();
-                    isRecording = true;
-                    btn.textContent = '⏹ Остановить';
-                    btn.classList.add('recording');
-                    statusText.textContent = 'Идёт запись... говорите';
-                    indicator.classList.add('active');
-                    visualizer.classList.add('active');
-                    setupVisualizer(stream);
-                    log('🎤 Начало записи голоса');
-                } catch (err) {
-                    log('❌ Ошибка доступа к микрофону: ' + err.message);
-                    alert('Разрешите доступ к микрофону в настройках браузера');
-                }
-            } else {
-                mediaRecorder.stop();
-                isRecording = false;
-                btn.textContent = '🎤 Нажми и говори';
-                btn.classList.remove('recording');
-                statusText.textContent = 'Обработка...';
-                indicator.classList.remove('active');
-                visualizer.classList.remove('active');
-                log('🎤 Конец записи, отправка...');
-            }
-        }
-
-        function setupVisualizer(stream) {
-            audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            analyser = audioContext.createAnalyser();
-            const source = audioContext.createMediaStreamSource(stream);
-            source.connect(analyser);
-            analyser.fftSize = 256;
-            visualizerCanvas = document.getElementById('audio-visualizer');
-            visualizerCtx = visualizerCanvas.getContext('2d');
-            visualizerCanvas.width = visualizerCanvas.offsetWidth;
-            visualizerCanvas.height = visualizerCanvas.offsetHeight;
-            drawVisualizer();
-        }
-
-        function drawVisualizer() {
-            if (!isRecording || !analyser) return;
-            requestAnimationFrame(drawVisualizer);
-            const bufferLength = analyser.frequencyBinCount;
-            const dataArray = new Uint8Array(bufferLength);
-            analyser.getByteFrequencyData(dataArray);
-            visualizerCtx.fillStyle = '#0a0a0a';
-            visualizerCtx.fillRect(0, 0, visualizerCanvas.width, visualizerCanvas.height);
-            const barWidth = (visualizerCanvas.width / bufferLength) * 2.5;
-            let x = 0;
-            for (let i = 0; i < bufferLength; i++) {
-                const barHeight = dataArray[i] / 2;
-                visualizerCtx.fillStyle = `rgb(${barHeight + 100}, 50, 50)`;
-                visualizerCtx.fillRect(x, visualizerCanvas.height - barHeight, barWidth, barHeight);
-                x += barWidth + 1;
-            }
-        }
-
-        async function sendVoiceToServer(audioBlob) {
-            const statusText = document.getElementById('voice-status-text');
-            statusText.textContent = 'Отправка на сервер...';
-            const formData = new FormData();
-            formData.append('audio', audioBlob, 'voice.wav');
-            formData.append('audio_output_mode_param', audioOutputMode);
-            try {
-                const response = await fetch('/voice', { method: 'POST', body: formData });
-                const data = await response.json();
-                if (data.status === 'ok') {
-                    addMessage('user', '🎤 ' + data.user_text);
-                    const emotionClass = 'emotion-' + (data.emotion || 'calm');
-                    addMessage('robot', data.response + `<span class="emotion-badge ${emotionClass}">${data.emotion}</span>`);
-                    if (audioOutputMode === 'local' && data.audio_base64) {
-                        playAudio(data.audio_base64);
-                    }
-                    if (data.ai_modes) {
-                        aiModes = data.ai_modes;
-                        updateAIModeUI();
-                    }
-                    statusText.textContent = 'Готово! Нажмите для новой записи';
-                } else {
-                    addMessage('robot', 'Ошибка: ' + (data.message || 'Неизвестная'));
-                    statusText.textContent = 'Ошибка: ' + data.message;
-                }
-            } catch (e) {
-                log('❌ Ошибка сети: ' + e);
-                statusText.textContent = 'Ошибка сети';
-            }
-        }
-
-        // ===== CHAT =====
-        async function sendChat() {
-            const input = document.getElementById('chat-input');
-            const text = input.value.trim();
-            if (!text) return;
-            input.value = '';
-            addMessage('user', text);
-            if (audioOutputMode === 'robot') {
-                sendCmd({type: 'text', text: text});
-            } else {
-                await sendLocal(text);
-            }
-        }
-
-        async function sendLocal(text) {
-            try {
-                const formData = new FormData();
-                formData.append('text', text);
-                const response = await fetch('/speak', { method: 'POST', body: formData });
-                const data = await response.json();
-                if (data.status === 'ok') {
-                    const emotionClass = 'emotion-' + (data.emotion || 'calm');
-                    addMessage('robot', data.response + `<span class="emotion-badge ${emotionClass}">${data.emotion}</span>`);
-                    if (data.audio_base64) playAudio(data.audio_base64);
-                    if (data.ai_modes) {
-                        aiModes = data.ai_modes;
-                        updateAIModeUI();
-                    }
-                } else {
-                    addMessage('robot', 'Ошибка: ' + (data.message || 'Неизвестная'));
-                }
-            } catch (e) {
-                log('❌ Ошибка сети: ' + e);
-            }
-        }
-
-        function playAudio(base64Audio) {
-            const audio = document.getElementById('audio-player');
-            audio.src = 'data:audio/wav;base64,' + base64Audio;
-            audio.play().catch(e => log('❌ Audio play error: ' + e.message));
-        }
-
-        function addMessage(sender, text) {
-            const chat = document.getElementById('chat-history');
-            const div = document.createElement('div');
-            div.className = 'message ' + sender;
-            div.innerHTML = sender === 'user' ? '<b>👤 Вы:</b> ' + text : '<b>🦉 Сорен:</b> ' + text;
-            chat.appendChild(div);
-            chat.scrollTop = chat.scrollHeight;
-        }
-
-        function sendCmd(cmd) {
-            ws.send(JSON.stringify(cmd));
-            log('→ ' + JSON.stringify(cmd));
-        }
-
-        function log(msg) {
-            const el = document.getElementById('log');
-            el.innerHTML += `[${new Date().toLocaleTimeString()}] ${msg}<br>`;
-            el.scrollTop = el.scrollHeight;
-        }
-
-        // ===== SERVOS =====
-        function createServoGrid() {
-            const grid = document.getElementById('servo-grid');
-            for (let i = 0; i < 18; i++) {
-                const div = document.createElement('div');
-                div.className = 'servo';
-                div.innerHTML = `<b>S${i}</b><br><span id="val-${i}">90°</span><br><input type="range" id="servo-${i}" min="0" max="180" value="90" oninput="document.getElementById('val-${i}').textContent=this.value+'°'">`;
-                grid.appendChild(div);
-            }
-        }
-        function setAllServos() {
-            const angles = [];
-            for (let i = 0; i < 18; i++) angles.push(parseInt(document.getElementById(`servo-${i}`).value));
-            sendCmd({type: 'servo_multi', angles: angles});
-        }
-        function resetServos() {
-            for (let i = 0; i < 18; i++) {
-                document.getElementById(`servo-${i}`).value = 90;
-                document.getElementById(`val-${i}`).textContent = '90°';
-            }
-            sendCmd({type: 'servo_multi', angles: new Array(18).fill(90)});
-        }
-        function updateServoDisplay(angles) {
-            for (let i = 0; i < angles.length; i++) {
-                const slider = document.getElementById(`servo-${i}`);
-                const val = document.getElementById(`val-${i}`);
-                if (slider && val) { slider.value = angles[i]; val.textContent = angles[i] + '°'; }
-            }
-        }
-
-        createServoGrid();
-    </script>
+  function createServoGrid() {
+    const main = document.getElementById('servo-grid-main');
+    for (let i=0;i<16;i++) main.appendChild(makeServo(i));
+    const direct = document.getElementById('servo-grid-direct');
+    for (let i=16;i<18;i++) direct.appendChild(makeServo(i));
+  }
+  function makeServo(i) {
+    const div = document.createElement('div');
+    div.className = 'servo';
+    div.innerHTML = `<div class="ch">CH ${String(i).padStart(2,'0')}</div><div class="deg" id="val-${i}">90°</div><input type="range" id="servo-${i}" min="0" max="180" value="90" oninput="document.getElementById('val-${i}').textContent=this.value+'°'">`;
+    return div;
+  }
+  function setAllServos() {
+    const angles = [];
+    for (let i=0;i<18;i++) angles.push(parseInt(document.getElementById(`servo-${i}`).value));
+    sendCmd({type:'servo_multi', angles});
+  }
+  function resetServos() {
+    for (let i=0;i<18;i++) {
+      document.getElementById(`servo-${i}`).value = 90;
+      document.getElementById(`val-${i}`).textContent = '90°';
+    }
+    sendCmd({type:'servo_multi', angles:new Array(18).fill(90)});
+  }
+  function updateServoDisplay(angles) {
+    for (let i=0;i<angles.length;i++) {
+      const slider = document.getElementById(`servo-${i}`);
+      const val = document.getElementById(`val-${i}`);
+      if (slider && val) { slider.value = angles[i]; val.textContent = angles[i] + '°'; }
+    }
+  }
+  createServoGrid();
+</script>
 </body>
 </html>
+
 """
 
 
