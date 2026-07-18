@@ -1,6 +1,10 @@
 import requests
+import os
 
-key = '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'
+# Токен берётся из переменной окружения
+key = os.getenv('GITHUB_MODELS_KEY')
+if not key:
+    raise ValueError('GITHUB_MODELS_KEY не задан. Установи переменную окружения.')
 
 payload = {
     'model': 'gpt-4o-mini',
