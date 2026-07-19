@@ -408,6 +408,25 @@ PANEL_HTML = """
     --rust:#b5533c;
     --radius:3px;
   }
+  :root.light{
+    --bg:#f7f5f0;
+    --panel:#ffffff;
+    --panel-alt:#f5f3ee;
+    --raised:#ebe9e4;
+    --border:#d5d2ca;
+    --border-soft:#e0ddd5;
+    --text:#1a1a1a;
+    --text-dim:#4a4a4a;
+    --text-faint:#888888;
+    --amber:#b8860b;
+    --amber-soft:#d4a537;
+    --sage:#3d7a3d;
+    --slate:#2a5a7a;
+    --rust:#a04030;
+  }
+  body.light{
+    background:var(--bg); color:var(--text);
+  }
   *{box-sizing:border-box;}
   body{
     margin:0; background:var(--bg); color:var(--text);
@@ -430,6 +449,7 @@ PANEL_HTML = """
       linear-gradient(90deg, var(--amber-soft) 0%, transparent 2px) 0 0,
       linear-gradient(90deg, var(--amber-soft) 0%, transparent 2px) 100% 0;
     background-size: 2px 100%; background-repeat:no-repeat; opacity:.6;
+    pointer-events:none;
   }
   .brand{ display:flex; align-items:center; gap:16px; }
   .eye{ width:38px; height:38px; flex-shrink:0; }
@@ -486,6 +506,7 @@ PANEL_HTML = """
   .segmented button{
     flex:1; border:none; background:transparent; color:var(--text-faint);
     padding:8px 6px; cursor:pointer; letter-spacing:.5px; transition:.15s;
+    border-radius:0; font-family:inherit; font-size:inherit; font-weight:inherit;
   }
   .segmented button:first-child{ border-right:1px solid var(--border); }
   .segmented button.active.local{ background:rgba(122,155,118,.16); color:var(--sage); }
@@ -531,12 +552,15 @@ PANEL_HTML = """
   .voice-status .rec.active{ display:inline; }
   canvas.visualizer{ width:100%; height:34px; background:var(--panel-alt); border:1px solid var(--border-soft); border-radius:var(--radius); display:none; }
   canvas.visualizer.active{ display:block; }
+  :root.light canvas.visualizer{ background:var(--raised); }
 
   /* ===== CHAT ===== */
   .chat-log{ max-height:260px; overflow-y:auto; display:flex; flex-direction:column; gap:8px; margin-bottom:12px; padding-right:4px; }
   .msg{ font-size:12.5px; line-height:1.5; padding:9px 12px; border-radius:var(--radius); border:1px solid var(--border-soft); }
   .msg.user{ background:var(--panel-alt); }
+  :root.light .msg.user{ background:var(--raised); border-color:var(--border-soft); }
   .msg.robot{ background:rgba(212,165,55,.06); border-color:rgba(212,165,55,.2); }
+  :root.light .msg.robot{ background:rgba(184,134,11,.08); border-color:rgba(184,134,11,.25); }
   .msg .who{ font-family:'IBM Plex Mono', monospace; font-size:10px; letter-spacing:1px; color:var(--text-faint); text-transform:uppercase; display:block; margin-bottom:3px; }
   .emotion-tag{ display:inline-block; font-family:'IBM Plex Mono', monospace; font-size:9.5px; letter-spacing:1px; text-transform:uppercase; padding:1px 7px; border-radius:10px; margin-left:8px; border:1px solid; }
   .em-calm{ color:#7fa8c9; border-color:#7fa8c9; }
@@ -552,6 +576,7 @@ PANEL_HTML = """
     padding:10px 12px; border-radius:var(--radius); font-family:'IBM Plex Sans', sans-serif; font-size:13px;
   }
   input[type=text]:focus{ outline:none; border-color:var(--amber-soft); }
+  :root.light input[type=text]{ background:var(--raised); }
 
   button.btn{
     background:transparent; border:1px solid var(--border); color:var(--text-dim);
@@ -588,9 +613,24 @@ PANEL_HTML = """
     height:200px; overflow-y:auto; padding:10px 12px;
     font-family:'IBM Plex Mono', monospace; font-size:11px; line-height:1.7; color:#8fa397;
   }
+  :root.light .log{
+    background:#ffffff;
+    color:#1a1a1a;
+    border-color:var(--border);
+  }
   .log::-webkit-scrollbar, .chat-log::-webkit-scrollbar{ width:6px; }
   .log::-webkit-scrollbar-thumb, .chat-log::-webkit-scrollbar-thumb{ background:var(--border); border-radius:3px; }
+  :root.light .log::-webkit-scrollbar-thumb{ background:var(--border-soft); }
 
+  button.theme-btn{
+    display:flex; align-items:center; gap:8px;
+    background:var(--panel-alt); border:1px solid var(--border); color:var(--text-dim);
+    padding:7px 14px; border-radius:var(--radius); cursor:pointer; font-family:'IBM Plex Sans', sans-serif;
+    font-size:12px; font-weight:500; transition:.15s;
+    flex:none; letter-spacing:normal;
+  }
+  button.theme-btn:hover{ border-color:var(--amber-soft); color:var(--amber); background:var(--panel-alt); }
+  button.theme-btn svg{ flex-shrink:0; }
   @media (max-width: 860px){
     .core-grid{ grid-template-columns:1fr; }
     .audio-grid{ grid-template-columns:1fr; }
@@ -626,6 +666,21 @@ PANEL_HTML = """
         <span class="label">Link</span>
         <span class="value"><span class="status-dot" id="status-dot"></span><span id="status-text">OFFLINE</span></span>
       </div>
+
+      <button class="theme-btn" onclick="toggleTheme()" title="Переключить тему">
+        <svg id="theme-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="5"></circle>
+          <line x1="12" y1="1" x2="12" y2="3"></line>
+          <line x1="12" y1="21" x2="12" y2="23"></line>
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+          <line x1="1" y1="12" x2="3" y2="12"></line>
+          <line x1="21" y1="12" x2="23" y2="12"></line>
+          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+          <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+        </svg>
+        <span id="theme-label">Тёмная</span>
+      </button>
     </div>
   </div>
 
@@ -1008,6 +1063,37 @@ PANEL_HTML = """
     }
   }
   createServoGrid();
+
+  function toggleTheme() {
+    const body = document.body;
+    const root = document.documentElement;
+    const label = document.getElementById('theme-label');
+    const icon = document.getElementById('theme-icon');
+    if (body.classList.contains('light')) {
+      body.classList.remove('light');
+      root.classList.remove('light');
+      label.textContent = 'Тёмная';
+      icon.innerHTML = '<circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>';
+      localStorage.setItem('soren-theme', 'dark');
+    } else {
+      body.classList.add('light');
+      root.classList.add('light');
+      label.textContent = 'Светлая';
+      icon.innerHTML = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>';
+      localStorage.setItem('soren-theme', 'light');
+    }
+  }
+  // Восстановление темы при загрузке
+  (function() {
+    const saved = localStorage.getItem('soren-theme');
+    const icon = document.getElementById('theme-icon');
+    if (saved === 'light') {
+      document.body.classList.add('light');
+      document.documentElement.classList.add('light');
+      document.getElementById('theme-label').textContent = 'Светлая';
+      icon.innerHTML = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>';
+    }
+  })();
 </script>
 </body>
 </html>
