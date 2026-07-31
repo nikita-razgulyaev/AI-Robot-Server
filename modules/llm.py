@@ -1,28 +1,161 @@
-"""LLM модуль - Сорен (local llama.cpp / cloud GitHub Models) с RAG и persona"""
+"""LLM модуль — Сорен (local llama.cpp / cloud GitHub Models) с Vector RAG, памятью и LoRA"""
 import logging
 import json
 import re
 from pathlib import Path
 from typing import List, Dict, Optional
 from config.settings import (
-    LLM_MODE, LLM_MODEL_PATH, LLM_N_CTX, LLM_N_THREADS, LLM_TEMPERATURE,
-    CHARACTER_DIR, RAG_TOP_K, GITHUB_MODELS_KEY, GITHUB_MODELS_NAME
+    LLM_MODE, LLM_MODEL_PATH, LLM_N_CTX, LLM_N_THREADS, LLM_TEMPERATURE, LLM_REPEAT_PENALTY,
+    CHARACTER_DIR, RAG_TOP_K, GITHUB_MODELS_KEY, GITHUB_MODELS_NAME,
+    LORA_ENABLED, LORA_PATH, LORA_SCALE
 )
+from modules.qdrant_singleton import get_qdrant_client, get_encoder, encode_text
 
 logger = logging.getLogger(__name__)
 
 
-class GitHubModelsLLMEngine:
-    """Облачный LLM через GitHub Models API (бесплатный, без VPN)"""
+# === VECTOR RAG через Qdrant + Sentence-Transformers ===
+
+class VectorRAG:
+    """Векторный RAG через Qdrant — семантический поиск по чанкам"""
 
     def __init__(self):
+        self.client = None
+        self.encoder = None
+        self._init()
+
+    def _init(self):
+        try:
+            self.client = get_qdrant_client()
+            self.encoder = get_encoder()
+            logger.info("✅ VectorRAG инициализирован (shared Qdrant)")
+        except Exception as e:
+            logger.error(f"❌ Ошибка инициализации VectorRAG: {e}")
+            self.client = None
+            self.encoder = None
+
+    def search(self, query: str, top_k: int = 3) -> List[str]:
+        """Семантический поиск по RAG-чанкам"""
+        if self.client is None:
+            logger.warning("VectorRAG недоступен, возвращаем пустой результат")
+            return []
+
+        try:
+            query_vector = encode_text(query)
+            results = self.client.search(
+                collection_name="soren_rag_chunks",
+                query_vector=query_vector,
+                limit=top_k
+            )
+            texts = [r.payload["text"] for r in results]
+            logger.info(f"🔍 VectorRAG: найдено {len(texts)} чанков для запроса")
+            return texts
+        except Exception as e:
+            logger.error(f"Ошибка поиска в VectorRAG: {e}")
+            return []
+
+    def search_with_scores(self, query: str, top_k: int = 3) -> List[Dict]:
+        """Поиск с оценками сходства"""
+        if self.client is None:
+            return []
+
+        try:
+            query_vector = encode_text(query)
+            results = self.client.search(
+                collection_name="soren_rag_chunks",
+                query_vector=query_vector,
+                limit=top_k
+            )
+            return [
+                {
+                    "text": r.payload["text"],
+                    "score": round(r.score, 3),
+                    "tags": r.payload.get("tags", []),
+                    "source": r.payload.get("source", "")
+                }
+                for r in results
+            ]
+        except Exception as e:
+            logger.error(f"Ошибка поиска в VectorRAG: {e}")
+            return []
+
+
+# === Fallback keyword-based RAG ===
+
+class KeywordRAG:
+    """Простой keyword-based RAG — fallback"""
+
+    def __init__(self, chunks_path: Path):
+        self.chunks: List[Dict] = []
+        self._load(chunks_path)
+
+    def _load(self, path: Path):
+        if not path.exists():
+            logger.warning(f"RAG файл не найден: {path}")
+            return
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        self.chunks.append(json.loads(line))
+            logger.info(f"Keyword RAG загружено: {len(self.chunks)} чанков")
+        except Exception as e:
+            logger.error(f"Ошибка загрузки RAG: {e}")
+
+    def search(self, query: str, top_k: int = 3) -> List[str]:
+        query_lower = query.lower()
+        keywords = set(re.findall(r'[\w\-]+', query_lower))
+
+        scored = []
+        for chunk in self.chunks:
+            score = 0
+            text_lower = chunk["text"].lower()
+            tags = [t.lower() for t in chunk.get("tags", [])]
+
+            for kw in keywords:
+                if kw in tags:
+                    score += 10
+                if kw in text_lower:
+                    score += 3
+
+            triggers = {
+                "клудд": ["клудд", "брат", "металлический", "предательство"],
+                "гильфи": ["гильфи", "друг", "подруга", "сычик"],
+                "эзилриб": ["эзилриб", "учитель", "наставник"],
+                "пеллиппер": ["пеллиппер", "любовь", "сердце"],
+                "сант": ["сант-эголиус", "плен", "эголиус"],
+                "древо": ["древо", "га'хул", "стражи"],
+                "чистые": ["чистые", "крупинки", "враг"],
+            }
+            for trigger_word, related in triggers.items():
+                if trigger_word in query_lower:
+                    for rel in related:
+                        if rel in text_lower or rel in tags:
+                            score += 5
+
+            if score > 0:
+                scored.append((score, chunk))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [chunk["text"] for _, chunk in scored[:top_k]]
+
+
+# === GitHub Models (облачный LLM) ===
+
+class GitHubModelsLLMEngine:
+    """Облачный LLM через GitHub Models API"""
+
+    def __init__(self, memory_manager=None):
         self.api_key = GITHUB_MODELS_KEY
         self.model = GITHUB_MODELS_NAME
         self.base_url = "https://models.inference.ai.azure.com/chat/completions"
         self.conversation_history = []
         self.system_prompt = ""
-        self.rag = None
+        self.vector_rag = None
+        self.keyword_rag = None
         self.emotion_keywords = {}
+        self.memory = memory_manager
 
         self._load_system_prompt()
         self._load_rag()
@@ -42,8 +175,11 @@ class GitHubModelsLLMEngine:
             self.system_prompt = "Ты — Сорен, амбарная сова, Главный Страж. Отвечай мудро и сдержанно."
 
     def _load_rag(self):
-        rag_path = CHARACTER_DIR / "Soren_rag_chunks.jsonl"
-        self.rag = RAGIndex(rag_path)
+        self.vector_rag = VectorRAG()
+        rag_path = CHARACTER_DIR / "Soren_rag_chunks.json"
+        if not rag_path.exists():
+            rag_path = CHARACTER_DIR / "Soren_rag_chunks.jsonl"
+        self.keyword_rag = KeywordRAG(rag_path)
 
     def _load_emotion_keywords(self):
         emotions_path = CHARACTER_DIR / "Soren_emotions.json"
@@ -86,15 +222,20 @@ class GitHubModelsLLMEngine:
 
         return "calm"
 
-    def _build_messages(self, user_message: str, vision_context: str = "") -> List[Dict]:
-        rag_chunks = self.rag.search(user_message, top_k=RAG_TOP_K) if self.rag else []
+    def _build_messages(self, user_message: str, vision_context: str = "", memory_context: str = "") -> List[Dict]:
+        rag_chunks = self.vector_rag.search(user_message, top_k=RAG_TOP_K) if self.vector_rag else []
+        if not rag_chunks and self.keyword_rag:
+            rag_chunks = self.keyword_rag.search(user_message, top_k=RAG_TOP_K)
+
         rag_text = "\n".join(rag_chunks) if rag_chunks else ""
 
         system_content = self.system_prompt
         if rag_text:
-            system_content += f"\n\nРелевантные воспоминания:\n{rag_text}"
+            system_content += f"\n\nРелевантные воспоминания из канона:\n{rag_text}"
         if vision_context:
             system_content += f"\n\n[Ты видишь: {vision_context}]"
+        if memory_context:
+            system_content += f"\n\n[Память о пользователе:\n{memory_context}]"
 
         messages = [{"role": "system", "content": system_content}]
 
@@ -104,7 +245,7 @@ class GitHubModelsLLMEngine:
         messages.append({"role": "user", "content": user_message})
         return messages
 
-    def generate(self, user_message: str, vision_context: str = "") -> dict:
+    def generate(self, user_message: str, vision_context: str = "", memory_context: str = "") -> dict:
         if not self.api_key:
             return {
                 "text": "GITHUB_MODELS_KEY не задан. Получи токен на https://github.com/settings/tokens и добавь в .env",
@@ -115,7 +256,7 @@ class GitHubModelsLLMEngine:
         try:
             import requests
 
-            messages = self._build_messages(user_message, vision_context)
+            messages = self._build_messages(user_message, vision_context, memory_context)
 
             payload = {
                 "model": self.model,
@@ -125,7 +266,6 @@ class GitHubModelsLLMEngine:
             }
 
             json_body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
-
             logger.info(f"GitHub Models запрос: model={self.model}, messages={len(messages)}")
 
             response = requests.post(
@@ -176,9 +316,7 @@ class GitHubModelsLLMEngine:
             return {"text": response_text, "action": action, "emotion": emotion}
 
         except Exception as e:
-            logger.error(f"Ошибка облачного LLM (GitHub Models): {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Ошибка облачного LLM: {e}")
             return {
                 "text": "*(пауза)* ... Прости, друг. Мысли улетели далеко. Повтори, пожалуйста.",
                 "action": None,
@@ -190,74 +328,19 @@ class GitHubModelsLLMEngine:
         logger.info("История диалога очищена")
 
 
-class RAGIndex:
-    """Простой keyword-based RAG по чанкам"""
-
-    def __init__(self, chunks_path: Path):
-        self.chunks: List[Dict] = []
-        self._load(chunks_path)
-
-    def _load(self, path: Path):
-        if not path.exists():
-            logger.warning(f"RAG файл не найден: {path}")
-            return
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        self.chunks.append(json.loads(line))
-            logger.info(f"RAG загружено: {len(self.chunks)} чанков")
-        except Exception as e:
-            logger.error(f"Ошибка загрузки RAG: {e}")
-
-    def search(self, query: str, top_k: int = 3) -> List[str]:
-        query_lower = query.lower()
-        keywords = set(re.findall(r'[\w\-]+', query_lower))
-
-        scored = []
-        for chunk in self.chunks:
-            score = 0
-            text_lower = chunk["text"].lower()
-            tags = [t.lower() for t in chunk.get("tags", [])]
-
-            for kw in keywords:
-                if kw in tags:
-                    score += 10
-                if kw in text_lower:
-                    score += 3
-
-            triggers = {
-                "клудд": ["клудд", "брат", "металлический", "предательство"],
-                "гильфи": ["гильфи", "друг", "подруга", "сычик"],
-                "эзилриб": ["эзилриб", "учитель", "наставник"],
-                "пеллиппер": ["пеллиппер", "любовь", "сердце"],
-                "сант": ["сант-эголиус", "плен", "эголиус"],
-                "древо": ["древо", "га'хул", "стражи"],
-                "чистые": ["чистые", "крупинки", "враг"],
-            }
-            for trigger_word, related in triggers.items():
-                if trigger_word in query_lower:
-                    for rel in related:
-                        if rel in text_lower or rel in tags:
-                            score += 5
-
-            if score > 0:
-                scored.append((score, chunk))
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [chunk["text"] for _, chunk in scored[:top_k]]
-
+# === Local LLM через llama.cpp ===
 
 class LocalLLMEngine:
-    """Локальный LLM через llama-cpp-python"""
+    """Локальный LLM через llama.cpp с поддержкой LoRA"""
 
-    def __init__(self):
+    def __init__(self, memory_manager=None):
         self.model = None
         self.conversation_history = []
         self.system_prompt = ""
-        self.rag = None
+        self.vector_rag = None
+        self.keyword_rag = None
         self.emotion_keywords = {}
+        self.memory = memory_manager
 
         self._load_system_prompt()
         self._load_rag()
@@ -274,8 +357,11 @@ class LocalLLMEngine:
             self.system_prompt = "Ты — Сорен, амбарная сова, Главный Страж. Отвечай мудро и сдержанно."
 
     def _load_rag(self):
-        rag_path = CHARACTER_DIR / "Soren_rag_chunks.jsonl"
-        self.rag = RAGIndex(rag_path)
+        self.vector_rag = VectorRAG()
+        rag_path = CHARACTER_DIR / "Soren_rag_chunks.json"
+        if not rag_path.exists():
+            rag_path = CHARACTER_DIR / "Soren_rag_chunks.jsonl"
+        self.keyword_rag = KeywordRAG(rag_path)
 
     def _load_emotion_keywords(self):
         emotions_path = CHARACTER_DIR / "Soren_emotions.json"
@@ -296,12 +382,22 @@ class LocalLLMEngine:
             return
         try:
             from llama_cpp import Llama
-            self.model = Llama(
-                model_path=str(LLM_MODEL_PATH),
-                n_ctx=LLM_N_CTX,
-                n_threads=LLM_N_THREADS,
-                verbose=False
-            )
+
+            kwargs = {
+                "model_path": str(LLM_MODEL_PATH),
+                "n_ctx": LLM_N_CTX,
+                "n_threads": LLM_N_THREADS,
+                "verbose": False
+            }
+
+            if LORA_ENABLED and LORA_PATH.exists():
+                kwargs["lora_path"] = str(LORA_PATH)
+                kwargs["lora_scale"] = LORA_SCALE
+                logger.info(f"LoRA загружен: {LORA_PATH} (scale={LORA_SCALE})")
+            elif LORA_ENABLED:
+                logger.warning(f"LoRA файл не найден: {LORA_PATH}")
+
+            self.model = Llama(**kwargs)
             logger.info("LLM загружена")
         except Exception as e:
             logger.error(f"Ошибка загрузки модели: {e}")
@@ -336,16 +432,21 @@ class LocalLLMEngine:
 
         return "calm"
 
-    def _build_prompt(self, user_message: str, vision_context: str = "") -> List[Dict]:
-        rag_chunks = self.rag.search(user_message, top_k=RAG_TOP_K) if self.rag else []
+    def _build_prompt(self, user_message: str, vision_context: str = "", memory_context: str = "") -> List[Dict]:
+        rag_chunks = self.vector_rag.search(user_message, top_k=RAG_TOP_K) if self.vector_rag else []
+        if not rag_chunks and self.keyword_rag:
+            rag_chunks = self.keyword_rag.search(user_message, top_k=RAG_TOP_K)
+
         rag_text = "\n".join(rag_chunks) if rag_chunks else ""
 
         messages = []
         system_content = self.system_prompt
         if rag_text:
-            system_content += f"\n\nРелевантные воспоминания для контекста:\n{rag_text}"
+            system_content += f"\n\nРелевантные воспоминания из канона:\n{rag_text}"
         if vision_context:
             system_content += f"\n\n[Ты видишь: {vision_context}]"
+        if memory_context:
+            system_content += f"\n\n[Память о пользователе:\n{memory_context}]"
 
         messages.append({"role": "system", "content": system_content})
 
@@ -355,7 +456,7 @@ class LocalLLMEngine:
         messages.append({"role": "user", "content": user_message})
         return messages
 
-    def generate(self, user_message: str, vision_context: str = "") -> dict:
+    def generate(self, user_message: str, vision_context: str = "", memory_context: str = "") -> dict:
         if self.model is None:
             return {
                 "text": "Модель LLM не загружена. Проверь логи и настройки.",
@@ -364,12 +465,13 @@ class LocalLLMEngine:
             }
 
         try:
-            messages = self._build_prompt(user_message, vision_context)
+            messages = self._build_prompt(user_message, vision_context, memory_context)
 
             output = self.model.create_chat_completion(
                 messages=messages,
                 temperature=LLM_TEMPERATURE,
                 max_tokens=256,
+                repeat_penalty=LLM_REPEAT_PENALTY,
                 stop=["</s>", "Пользователь:", "User:"],
             )
 
@@ -406,23 +508,25 @@ class LocalLLMEngine:
         logger.info("История диалога очищена")
 
 
-class LLMEngine:
-    """Универсальный LLM движок с переключением local/cloud"""
+# === Универсальный LLM движок ===
 
-    def __init__(self):
+class LLMEngine:
+    """Универсальный LLM движок с переключением local/cloud и памятью"""
+
+    def __init__(self, memory_manager=None):
         self.mode = LLM_MODE
         self.local_engine = None
         self.cloud_engine = None
+        self.memory = memory_manager
 
         if self.mode == "cloud":
-            self.cloud_engine = GitHubModelsLLMEngine()
+            self.cloud_engine = GitHubModelsLLMEngine(memory_manager)
             logger.info("☁️ LLM режим: ОБЛАЧНЫЙ (GitHub Models)")
         else:
-            self.local_engine = LocalLLMEngine()
-            logger.info("💻 LLM режим: ЛОКАЛЬНЫЙ (llama.cpp)")
+            self.local_engine = LocalLLMEngine(memory_manager)
+            logger.info("💻 LLM режим: ЛОКАЛЬНЫЙ (llama.cpp + LoRA)")
 
     def set_mode(self, mode: str):
-        """Переключает режим LLM"""
         if mode not in ["local", "cloud"]:
             logger.warning(f"Неверный режим LLM: {mode}. Используем 'local'")
             mode = "local"
@@ -430,12 +534,12 @@ class LLMEngine:
         self.mode = mode
         if mode == "cloud":
             if self.cloud_engine is None:
-                self.cloud_engine = GitHubModelsLLMEngine()
+                self.cloud_engine = GitHubModelsLLMEngine(self.memory)
             self.local_engine = None
-            logger.info("☁️ LLM переключён на ОБЛАЧНЫЙ (GitHub Models)")
+            logger.info("☁️ LLM переключён на ОБЛАЧНЫЙ")
         else:
             if self.local_engine is None:
-                self.local_engine = LocalLLMEngine()
+                self.local_engine = LocalLLMEngine(self.memory)
             self.cloud_engine = None
             logger.info("💻 LLM переключён на ЛОКАЛЬНЫЙ")
 
@@ -443,16 +547,22 @@ class LLMEngine:
         return self.mode
 
     def generate(self, user_message: str, vision_context: str = "") -> dict:
+        memory_context = ""
+        if self.memory:
+            memory_context = self.memory.get_context_for_llm()
+            self.memory.record_interaction(user_message, "", "calm")
+
         if self.mode == "cloud" and self.cloud_engine:
-            return self.cloud_engine.generate(user_message, vision_context)
+            result = self.cloud_engine.generate(user_message, vision_context, memory_context)
         elif self.local_engine:
-            return self.local_engine.generate(user_message, vision_context)
+            result = self.local_engine.generate(user_message, vision_context, memory_context)
         else:
-            return {
-                "text": "LLM движок не инициализирован.",
-                "action": None,
-                "emotion": "calm"
-            }
+            return {"text": "LLM движок не инициализирован.", "action": None, "emotion": "calm"}
+
+        if self.memory:
+            self.memory.record_interaction(user_message, result["text"], result["emotion"])
+
+        return result
 
     def clear_history(self):
         if self.cloud_engine:

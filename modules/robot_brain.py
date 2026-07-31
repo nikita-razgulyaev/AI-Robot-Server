@@ -1,4 +1,4 @@
-"""Главный мозг робота - оркестратор всех модулей с эмоциональным движком Сорена"""
+"""Главный мозг робота — оркестратор с эмоциональным движком и памятью"""
 import asyncio
 import logging
 import json
@@ -10,13 +10,14 @@ from modules.llm import LLMEngine
 from modules.vision import VisionEngine
 from modules.audio_buffer import AudioBuffer
 from modules.servo_controller import ServoController
+from modules.memory import MemoryManager
 from config.settings import CHARACTER_DIR
 
 logger = logging.getLogger(__name__)
 
 
 class EmotionEngine:
-    """Эмоциональный движок Сорена - определяет позы и LED из JSON"""
+    """Эмоциональный движок Сорена — позы и LED из JSON"""
 
     def __init__(self, emotions_path: Path):
         self.emotions: Dict = {}
@@ -58,14 +59,17 @@ class EmotionEngine:
 
 
 class RobotBrain:
-    """Основной контроллер - соединяет все модули"""
+    """Основной контроллер — соединяет все модули с памятью"""
 
     def __init__(self):
-        logger.info("=== Инициализация RobotBrain (Сорен) ===")
+        logger.info("=== Инициализация RobotBrain (Сорен v3.5 + Vector RAG) ===")
+
+        # Память ДО остальных модулей
+        self.memory = MemoryManager()
 
         self.stt = STTEngine()
         self.tts = TTSEngine()
-        self.llm = LLMEngine()
+        self.llm = LLMEngine(memory_manager=self.memory)
         self.vision = VisionEngine()
         self.audio_buffer = AudioBuffer()
         self.servos = ServoController()
@@ -77,22 +81,18 @@ class RobotBrain:
         self.is_processing = False
         self.current_emotion = "calm"
 
-        logger.info("=== RobotBrain (Сорен) готов ===")
+        logger.info("=== RobotBrain (Сорен v3.5 + Vector RAG) готов ===")
 
     def set_stt_mode(self, mode: str):
-        """Переключает режим STT"""
         self.stt.set_mode(mode)
 
     def set_tts_mode(self, mode: str):
-        """Переключает режим TTS"""
         self.tts.set_mode(mode)
 
     def set_llm_mode(self, mode: str):
-        """Переключает режим LLM"""
         self.llm.set_mode(mode)
 
     def get_modes(self) -> Dict[str, str]:
-        """Возвращает текущие режимы всех модулей"""
         return {
             "stt": self.stt.get_mode(),
             "tts": self.tts.get_mode(),
@@ -122,6 +122,9 @@ class RobotBrain:
                 logger.info(f"🎯 Fuzzy: используем исправленный текст: '{user_text}'")
 
             logger.info(f"Пользователь: {user_text}")
+
+            # Собираем полный контекст памяти
+            memory_context = self._build_memory_context(user_text)
 
             logger.info("Генерация ответа Сорена...")
             llm_result = self.llm.generate(user_text, self.vision_context)
@@ -158,6 +161,31 @@ class RobotBrain:
             }
         finally:
             self.is_processing = False
+
+    def _build_memory_context(self, user_text: str) -> str:
+        """Собирает полный контекст из краткосрочной и долгосрочной памяти"""
+        parts = []
+
+        # Краткосрочная память
+        stm = self.memory.short_term.get_context()
+        if stm:
+            parts.append(f"Последние реплики:\n{stm}")
+
+        # Долгосрочная память — релевантные воспоминания
+        ltm = self.memory.get_relevant_memories(user_text)
+        if ltm:
+            parts.append(f"Релевантные воспоминания:\n{ltm}")
+
+        # Эмоциональный профиль
+        dom = max(self.memory.profile.dominant_emotions, key=self.memory.profile.dominant_emotions.get)
+        parts.append(f"Доминантная эмоция пользователя: {dom}")
+
+        # Приветствие по времени
+        greeting = self.memory.get_day_greeting()
+        if greeting and not stm:
+            parts.append(f"Приветствие: {greeting}")
+
+        return "\n\n".join(parts)
 
     def _build_empty_response(self) -> dict:
         return {
@@ -215,6 +243,9 @@ class RobotBrain:
             except ImportError:
                 user_text = command["text"]
 
+            # Собираем контекст памяти
+            memory_context = self._build_memory_context(user_text)
+
             llm_result = self.llm.generate(user_text, self.vision_context)
             emotion = llm_result.get("emotion", "calm")
             servo_angles = self.emotion_engine.get_servo_angles(emotion)
@@ -245,13 +276,17 @@ class RobotBrain:
                 "processing": self.is_processing,
                 "vision_context": self.vision_context,
                 "current_emotion": self.current_emotion,
-                "modes": self.get_modes()
+                "modes": self.get_modes(),
+                "memory": self.memory.short_term.get_summary() if self.memory else {},
+                "ltm_enabled": self.memory.long_term.enabled if self.memory else False
             }
 
         elif cmd_type == "clear_history":
             self.llm.clear_history()
+            if self.memory:
+                self.memory.clear()
             self.current_emotion = "calm"
-            return {"status": "ok", "message": "История очищена"}
+            return {"status": "ok", "message": "История и память очищены"}
 
         elif cmd_type == "set_mode":
             module = command.get("module")
@@ -269,4 +304,6 @@ class RobotBrain:
 
     def shutdown(self):
         logger.info("Завершение работы RobotBrain...")
+        if self.memory:
+            self.memory.save_profile()
         self.vision.release()

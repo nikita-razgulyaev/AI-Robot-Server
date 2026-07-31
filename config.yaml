@@ -1,0 +1,77 @@
+# Конфигурация Сорена v3.5 — Vector RAG + Qdrant + LoRA
+
+server:
+    host: "0.0.0.0"
+    port: 8765
+
+# === Vector RAG (Qdrant + Sentence-Transformers) ===
+qdrant:
+    path: "./qdrant_storage" # Путь к локальной БД
+    encoder_model: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+
+# === Память ===
+memory:
+    short_term_max: 10 # Макс. реплик в RAM
+    long_term_enabled: true # Включить Qdrant LTM
+    qdrant_host: "localhost"
+    qdrant_port: 6333
+    collections:
+        emotional_moments: "soren_emotional_moments"
+        dialogue_turns: "soren_dialogue_turns"
+        facts: "soren_facts"
+        rag_chunks: "soren_rag_chunks"
+
+# === Fine-tuning / LoRA ===
+lora:
+    enabled: false # Включить после обучения
+    path: "models/soren_lora_v1.gguf"
+    scale: 1.0
+    rank: 16
+    alpha: 32
+
+# === STT ===
+stt:
+    mode: "local" # local / cloud
+    whisper_model: "small"
+    device: "cpu"
+    compute_type: "int8"
+
+# === TTS ===
+tts:
+    mode: "local" # local / cloud / edge
+    silero_speaker: "aidar"
+    silero_pitch_semitones: 1.5
+    silero_rate: 1.05
+    edge_voice: "ru-RU-DmitryNeural"
+    edge_speed: 1.0
+    edge_pitch: "+15Hz"
+
+# === LLM ===
+llm:
+    mode: "cloud" # local / cloud
+    n_ctx: 4096
+    n_threads: 4
+    temperature: 0.6
+    repeat_penalty: 1.15
+    cloud_model: "gpt-4o-mini"
+    cloud_api_key: "" # Берётся из .env GITHUB_MODELS_KEY
+
+# === Vision ===
+vision:
+    pose_tracking: true
+
+# === Audio ===
+audio:
+    sample_rate: 16000
+    chunk_duration_ms: 30
+    vad_aggressiveness: 2
+    silence_timeout_ms: 1500
+
+# === Servos ===
+servos:
+    pca9685_channels: 16
+    pca9685_address: 0x40
+    pca9685_freq: 50
+    extra_pins: [17, 18]
+    min_angle: 0
+    max_angle: 180
