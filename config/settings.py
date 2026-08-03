@@ -88,6 +88,64 @@ GITHUB_MODELS_NAME = _config.get("llm", {}).get("cloud_model", "gpt-4o-mini")
 YOLO_MODEL = MODELS_DIR / "yolov8n.pt"
 ENABLE_POSE_TRACKING = _config.get("vision", {}).get("pose_tracking", True)
 
+# === Слежение за лицом (OpenCV) ===
+# Робот поворачивает "голову" (серво pan/tilt) к лицу собеседника ТОЛЬКО пока
+# активен диалог. Вне диалога камера продолжает работать (для панели
+# мониторинга), но серво головы не дёргаются.
+FACE_TRACKING_ENABLED = _config.get("vision", {}).get("face_tracking", True)
+DIALOG_ACTIVE_TIMEOUT_SEC = float(_config.get("vision", {}).get("dialog_active_timeout_sec", 20))
+# "Предварительное" окно — продлевается уже на VAD speech_start/speech, ДО распознавания.
+# Даёт голове сразу начать реагировать, но быстро отпускает, если ничего не подтвердилось
+# (шум/кашель). Настоящий диалог держится через DIALOG_ACTIVE_TIMEOUT_SEC (см. is_dialog_active).
+PROVISIONAL_DIALOG_TIMEOUT_SEC = float(_config.get("vision", {}).get("provisional_dialog_timeout_sec", 4))
+FACE_PAN_SERVO = int(_config.get("vision", {}).get("face_pan_servo", 16))
+FACE_TILT_SERVO = int(_config.get("vision", {}).get("face_tilt_servo", 17))
+FACE_PAN_GAIN = float(_config.get("vision", {}).get("face_pan_gain", 45))
+FACE_TILT_GAIN = float(_config.get("vision", {}).get("face_tilt_gain", 30))
+
+# --- Сглаживание движения головы + "мёртвая зона" (имитация поля зрения) ---
+HEAD_SMOOTHING_ALPHA = float(_config.get("vision", {}).get("head_smoothing_alpha", 0.3))
+FACE_DEADZONE_X = float(_config.get("vision", {}).get("face_deadzone_x", 0.12))
+FACE_DEADZONE_Y = float(_config.get("vision", {}).get("face_deadzone_y", 0.12))
+
+# --- Плавный выход из диалога: голова сама едет обратно в центр, а не замирает резко ---
+EXIT_EASE_ALPHA = float(_config.get("vision", {}).get("exit_ease_alpha", 0.15))
+EXIT_EASE_EPSILON = float(_config.get("vision", {}).get("exit_ease_epsilon", 0.02))
+
+# --- Детектор лица: OpenCV DNN (основной) с откатом на Haar Cascade ---
+FACE_DETECTOR_PROTOTXT = MODELS_DIR / "face_detector" / "deploy.prototxt"
+FACE_DETECTOR_MODEL = MODELS_DIR / "face_detector" / "res10_300x300_ssd_iter_140000.caffemodel"
+FACE_DETECTOR_CONFIDENCE = float(_config.get("vision", {}).get("face_detector_confidence", 0.6))
+FACE_DETECTOR_INPUT_SIZE = int(_config.get("vision", {}).get("face_detector_input_size", 300))
+# Haar Cascade используется только если DNN-модель не скачана (см. scripts/download_face_detector.py)
+FACE_CASCADE_SCALE_FACTOR = float(_config.get("vision", {}).get("face_cascade_scale_factor", 1.1))
+FACE_CASCADE_MIN_NEIGHBORS = int(_config.get("vision", {}).get("face_cascade_min_neighbors", 5))
+FACE_CASCADE_MIN_SIZE = int(_config.get("vision", {}).get("face_cascade_min_size", 60))
+
+# --- Трекер лиц между кадрами (простой, по расстоянию центров) ---
+FACE_TRACKER_MAX_DISTANCE = int(_config.get("vision", {}).get("face_tracker_max_distance", 90))
+FACE_TRACKER_MAX_MISSED_FRAMES = int(_config.get("vision", {}).get("face_tracker_max_missed_frames", 12))
+
+# --- Выбор говорящего по движению губ ---
+LIP_ACTIVITY_WINDOW_SEC = float(_config.get("vision", {}).get("lip_activity_window_sec", 0.8))
+MIN_LIP_SAMPLES_FOR_DECISION = int(_config.get("vision", {}).get("min_lip_samples_for_decision", 3))
+
+# --- Троттлинг тяжёлых детекторов (YOLO/Pose не нужно гонять на каждый кадр) ---
+# Детекция лица + трекер + активность губ НЕ троттлятся — от их частоты напрямую
+# зависит плавность слежения (сглаживание) и скорость выбора говорящего по губам.
+YOLO_DETECTION_INTERVAL_SEC = float(_config.get("vision", {}).get("yolo_detection_interval_sec", 1.0))
+POSE_DETECTION_INTERVAL_SEC = float(_config.get("vision", {}).get("pose_detection_interval_sec", 0.2))
+
+# === Видео в панели мониторинга ===
+VIDEO_PANEL_MIN_INTERVAL_SEC = float(_config.get("vision", {}).get("panel_frame_interval_sec", 0.15))
+VIDEO_PANEL_JPEG_QUALITY = int(_config.get("vision", {}).get("panel_jpeg_quality", 70))
+
+# --- Частота отправки servo_update на ESP32 ---
+# Интерполяция углов уже сглаживается на самой прошивке (interpolateServos), поэтому
+# слать новую цель на КАЖДЫЙ видеокадр избыточно — троттлим отправку по сети,
+# сам расчёт (детекция/трекинг/сглаживание) при этом остаётся на полной частоте.
+SERVO_UPDATE_MIN_INTERVAL_SEC = float(_config.get("vision", {}).get("servo_update_min_interval_sec", 0.1))
+
 # Audio
 SAMPLE_RATE = int(_config.get("audio", {}).get("sample_rate", 16000))
 CHUNK_DURATION_MS = int(_config.get("audio", {}).get("chunk_duration_ms", 30))
@@ -131,3 +189,38 @@ ANIMATIONS = {
         {"time": 0, "servos": [90]*18},
     ],
 }
+
+# === Авторизация панели мониторинга / устройства ===
+# Один общий пароль (это личный робот, а не сервис на много пользователей).
+# Пусто по умолчанию = авторизация выключена (как было раньше — для удобства
+# первоначальной настройки, включается явно заданием пароля в .env).
+PANEL_PASSWORD = os.getenv("PANEL_PASSWORD", "")
+
+# Общий секрет, который ESP32 присылает вместе с "ping" для подтверждения,
+# что это доверенное устройство, а не случайный WS-клиент, притворяющийся им.
+# Пусто = не проверяем (совместимость со старой прошивкой без DEVICE_KEY).
+DEVICE_KEY = os.getenv("DEVICE_KEY", "")
+
+# Секрет для подписи cookie-сессии панели (HMAC). Если не задан явно в .env —
+# генерируется один раз и сохраняется в файл, чтобы перезапуск сервера
+# не разлогинивал всех пользователей панели.
+_SESSION_SECRET_FILE = BASE_DIR / "config" / ".session_secret"
+
+
+def _load_or_create_session_secret() -> str:
+    env_secret = os.getenv("SESSION_SECRET", "")
+    if env_secret:
+        return env_secret
+    if _SESSION_SECRET_FILE.exists():
+        return _SESSION_SECRET_FILE.read_text(encoding="utf-8").strip()
+    import secrets
+    new_secret = secrets.token_hex(32)
+    _SESSION_SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _SESSION_SECRET_FILE.write_text(new_secret, encoding="utf-8")
+    return new_secret
+
+
+SESSION_SECRET = _load_or_create_session_secret()
+SESSION_COOKIE_NAME = "soren_session"
+SESSION_SHORT_MAX_AGE_SEC = 12 * 3600            # без "запомнить это устройство" — 12 часов
+SESSION_REMEMBER_MAX_AGE_SEC = 90 * 24 * 3600    # с галочкой — 90 дней

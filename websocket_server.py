@@ -7,11 +7,18 @@ import base64
 import io
 import wave
 import tempfile
-from typing import Set, Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
-from fastapi.responses import HTMLResponse, JSONResponse
+from typing import Set, Optional, Dict, Tuple, List
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from modules.robot_brain import RobotBrain
-from config.settings import SERVER_HOST, SERVER_PORT
+from modules.auth import create_session_token, verify_session_token, is_valid_device_ping
+from config.settings import (
+    SERVER_HOST, SERVER_PORT,
+    VIDEO_PANEL_MIN_INTERVAL_SEC, VIDEO_PANEL_JPEG_QUALITY,
+    SERVO_UPDATE_MIN_INTERVAL_SEC,
+    PANEL_PASSWORD, DEVICE_KEY,
+    SESSION_COOKIE_NAME, SESSION_SHORT_MAX_AGE_SEC, SESSION_REMEMBER_MAX_AGE_SEC,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,6 +30,25 @@ app = FastAPI(title="Robot AI Server - Soren", version="3.0")
 
 robot_brain: RobotBrain = None
 active_connections: Set[WebSocket] = set()
+
+# Разделяем подключения /ws на "устройство" (ESP32, шлёт бинарные AUDI/VIDE кадры)
+# и "панель" (браузер, инструментальная панель). Новое соединение по умолчанию
+# считается панелью и переклассифицируется в устройство при первом бинарном пакете —
+# так ESP32 не грузится ненужными ей JSON-кадрами видео.
+panel_connections: Set[WebSocket] = set()
+device_connections: Set[WebSocket] = set()
+
+_last_panel_frame_ts = None
+
+# Для каждого устройства помним, что и когда ему последний раз реально отправляли,
+# чтобы слать: а) не чаще SERVO_UPDATE_MIN_INTERVAL_SEC, б) только ИЗМЕНИВШИЕСЯ углы
+# (delta), а не все 18 на каждый кадр — интерполяция на ESP32 и так плавно доедет
+# между редкими целями (см. interpolateServos в прошивке).
+_last_servo_send: Dict[WebSocket, Tuple[float, Optional[List[int]]]] = {}
+
+# Хочет ли конкретная панель получать видео (чекбокс "Показывать видео") —
+# по умолчанию True для новых подключений, пока панель явно не скажет иначе.
+panel_wants_video: Dict[WebSocket, bool] = {}
 
 # ===== РАЗДЕЛЬНЫЕ РЕЖИМЫ АУДИО =====
 audio_input_mode = "robot"   # "robot" = ESP32 микрофон, "local" = микрофон ноутбука
@@ -65,9 +91,12 @@ async def status():
         "audio_output_mode": audio_output_mode,
         "ai_modes": robot_brain.get_modes(),
         "connections": len(active_connections),
+        "panel_connections": len(panel_connections),
+        "device_connections": len(device_connections),
         "servo_angles": robot_brain.servos.get_current_angles(),
         "vision_context": robot_brain.vision_context,
-        "current_emotion": robot_brain.current_emotion
+        "current_emotion": robot_brain.current_emotion,
+        "dialog_active": robot_brain.is_dialog_active()
     }
 
 @app.post("/audio_mode")
@@ -145,6 +174,8 @@ async def speak_text(text: str = Form(...)):
             user_text = corrected_text
         except ImportError:
             user_text = text
+
+        robot_brain.mark_dialog_active()
 
         llm_result = robot_brain.llm.generate(user_text, robot_brain.vision_context)
         response_text = llm_result.get("text", "")
@@ -233,6 +264,8 @@ async def voice_input(
         if not user_text.strip():
             return JSONResponse({"status": "error", "message": "Пустой текст"})
 
+        robot_brain.mark_dialog_active()
+
         llm_result = robot_brain.llm.generate(user_text, robot_brain.vision_context)
         response_text = llm_result.get("text", "")
         action = llm_result.get("action")
@@ -283,14 +316,56 @@ async def voice_input(
 
 # ===== WEBSOCKET =====
 
+def _cookie_authorized(websocket: WebSocket) -> bool:
+    """Панель/браузер: валидна ли cookie-сессия. Если PANEL_PASSWORD не задан —
+    авторизация выключена (обратная совместимость)."""
+    if not PANEL_PASSWORD:
+        return True
+    token = websocket.cookies.get(SESSION_COOKIE_NAME)
+    return verify_session_token(token)
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    active_connections.add(websocket)
     client_info = f"{websocket.client.host}:{websocket.client.port}"
-    logger.info(f"ESP32 подключен: {client_info}")
+
+    is_trusted = _cookie_authorized(websocket)
+    pending_first_message = None
+
+    if not is_trusted and PANEL_PASSWORD:
+        # Ни валидной cookie, ни ясности что это ESP32 — даём ОДИН шанс
+        # представиться устройством (ping + device_key) в течение 5 секунд,
+        # иначе соединение закрывается ДО обработки каких-либо команд.
+        try:
+            pending_first_message = await asyncio.wait_for(websocket.receive(), timeout=5.0)
+        except (asyncio.TimeoutError, WebSocketDisconnect):
+            logger.warning(f"Неавторизованное подключение отклонено (таймаут): {client_info}")
+            await websocket.close(code=4401)
+            return
+
+        text = pending_first_message.get("text")
+        if not (text and is_valid_device_ping(text, DEVICE_KEY)):
+            logger.warning(f"Неавторизованное подключение отклонено: {client_info}")
+            await websocket.close(code=4401)
+            return
+
+        device_connections.add(websocket)
+
+    active_connections.add(websocket)
+    if websocket not in device_connections:
+        panel_connections.add(websocket)  # по умолчанию считаем панелью, пока не докажет обратное
+
+    logger.info(f"Клиент подключен: {client_info}")
 
     try:
+        if pending_first_message is not None:
+            # Уже прочитанное первое сообщение (ping от устройства) — обработать как обычно
+            if "text" in pending_first_message:
+                await handle_text_message(websocket, pending_first_message["text"])
+            elif "bytes" in pending_first_message:
+                await handle_binary_message(websocket, pending_first_message["bytes"])
+
         while True:
             message = await websocket.receive()
             if "text" in message:
@@ -298,11 +373,33 @@ async def websocket_endpoint(websocket: WebSocket):
             elif "bytes" in message:
                 await handle_binary_message(websocket, message["bytes"])
     except WebSocketDisconnect:
-        logger.info(f"ESP32 отключен: {client_info}")
+        logger.info(f"Клиент отключен: {client_info}")
     except Exception as e:
         logger.error(f"Ошибка WebSocket: {e}")
     finally:
         active_connections.discard(websocket)
+        panel_connections.discard(websocket)
+        device_connections.discard(websocket)
+        _last_servo_send.pop(websocket, None)
+        panel_wants_video.pop(websocket, None)
+
+
+async def broadcast_to_panels(message: dict, recipients: Optional[Set[WebSocket]] = None):
+    """Рассылает JSON-сообщение панелям мониторинга. Если recipients не указан —
+    всем подключённым панелям; иначе — только переданному подмножеству
+    (используется для видео, чтобы не слать тем, кто его отключил)."""
+    targets = recipients if recipients is not None else panel_connections
+    dead = []
+    for conn in list(targets):
+        try:
+            await conn.send_json(message)
+        except Exception:
+            dead.append(conn)
+    for conn in dead:
+        panel_connections.discard(conn)
+        active_connections.discard(conn)
+        device_connections.discard(conn)
+        panel_wants_video.pop(conn, None)
 
 
 async def handle_text_message(websocket: WebSocket, text: str):
@@ -314,7 +411,29 @@ async def handle_text_message(websocket: WebSocket, text: str):
             result = await robot_brain.handle_command(data)
             await websocket.send_json(result)
         elif msg_type == "ping":
+            # ESP32 шлёт "ping" первым сообщением сразу после коннекта (см. .ino,
+            # WStype_CONNECTED) — панель мониторинга такое никогда не шлёт. Это уже
+            # существующий надёжный маркер устройства, используем его для явной
+            # идентификации, не дожидаясь первого бинарного AUDI/VIDE-пакета.
+            device_connections.add(websocket)
+            panel_connections.discard(websocket)
             await websocket.send_json({"type": "pong", "timestamp": data.get("timestamp")})
+        elif msg_type == "hello":
+            # Явная самоидентификация клиента (например, панель шлёт {type:'hello', client:'panel'}
+            # при подключении) — на случай, если в будущем логика "по умолчанию — панель"
+            # изменится, лучше не полагаться только на неявный дефолт.
+            client = data.get("client")
+            if client == "panel":
+                panel_connections.add(websocket)
+                device_connections.discard(websocket)
+            elif client == "esp32":
+                device_connections.add(websocket)
+                panel_connections.discard(websocket)
+            await websocket.send_json({"type": "hello_ack", "client": client})
+        elif msg_type == "video_pref":
+            # Панель сообщает, хочет ли она получать видео (чекбокс "Показывать видео").
+            # Не влияет на детекцию/трекинг — только на то, кому реально рассылается кадр.
+            panel_wants_video[websocket] = bool(data.get("enabled", True))
         elif msg_type == "audio_mode":
             await websocket.send_json({
                 "type": "audio_mode",
@@ -335,8 +454,47 @@ async def handle_text_message(websocket: WebSocket, text: str):
         await websocket.send_json({"status": "error", "message": str(e)})
 
 
+async def _maybe_broadcast_panel_frame():
+    """Рендерит и рассылает кадр в панель мониторинга — не чаще VIDEO_PANEL_MIN_INTERVAL_SEC,
+    и только тем панелям, у кого включено "Показывать видео". Если видео не хочет
+    ВООБЩЕ никто — даже не рендерим кадр (экономия CV-потока, см. пункт про троттлинг).
+    Вызывается и после VIDE (кадр детекции), и после VIDP (кадр повышенного качества,
+    если прошивка обновлена) — реальную частоту ограничивает троттлинг внутри."""
+    global _last_panel_frame_ts
+
+    recipients = {conn for conn in panel_connections if panel_wants_video.get(conn, True)}
+    if not recipients:
+        return
+
+    now = asyncio.get_event_loop().time()
+    if _last_panel_frame_ts is not None and (now - _last_panel_frame_ts) < VIDEO_PANEL_MIN_INTERVAL_SEC:
+        return
+
+    annotated = await robot_brain.render_panel_jpeg(VIDEO_PANEL_JPEG_QUALITY)
+    if not annotated:
+        return
+
+    _last_panel_frame_ts = now
+    status = robot_brain.get_panel_annotation_status()
+    frame_b64 = base64.b64encode(annotated).decode('ascii')
+    await broadcast_to_panels({
+        "type": "video_frame",
+        "image": frame_b64,
+        "face_detected": status["face_detected"],
+        "face_bbox": status["face_bbox"],
+        "faces_count": status["faces_count"],
+        "dialog_active": status["dialog_active"]
+    }, recipients=recipients)
+
+
 async def handle_binary_message(websocket: WebSocket, data: bytes):
     try:
+        # Только ESP32 шлёт бинарные AUDI/VIDE/VIDP пакеты — переклассифицируем соединение
+        # (запасной вариант; основная идентификация теперь по "ping", см. handle_text_message)
+        if websocket not in device_connections:
+            device_connections.add(websocket)
+            panel_connections.discard(websocket)
+
         if len(data) < 5:
             return
         data_type = data[:4].decode('ascii')
@@ -363,22 +521,166 @@ async def handle_binary_message(websocket: WebSocket, data: bytes):
 
         elif data_type == "VIDE":
             vision_result = await robot_brain.process_video_frame(payload)
-            servo_cmd = {
-                "type": "servo_update",
-                "angles": vision_result["servo_angles"],
-                "face_detected": vision_result["face_detected"],
-                "face_offset": vision_result["face_offset"]
-            }
-            await websocket.send_json(servo_cmd)
+            await _send_servo_update(websocket, vision_result)
+            await _maybe_broadcast_panel_frame()
+
+        elif data_type == "VIDP":
+            # Кадр повышенного качества ТОЛЬКО для панели мониторинга (реже, крупнее) —
+            # детекцию/трекинг/серво НЕ запускает. Если прошивка не обновлена и этот
+            # тег никогда не приходит — ничего не меняется, работает как раньше на VIDE.
+            ok = await robot_brain.update_panel_frame(payload)
+            if ok:
+                await _maybe_broadcast_panel_frame()
+
     except Exception as e:
         logger.error(f"Ошибка бинарных данных: {e}")
+
+
+async def _send_servo_update(websocket: WebSocket, vision_result: dict):
+    """Шлёт servo_update на ESP32: не чаще SERVO_UPDATE_MIN_INTERVAL_SEC и только
+    ИЗМЕНИВШИЕСЯ углы (delta) — интерполяция на прошивке и так плавно доедет между
+    редкими целями, полный массив на каждый кадр не нужен."""
+    servo_angles = vision_result["servo_angles"]
+    now = asyncio.get_event_loop().time()
+    last_send_ts, last_sent_angles = _last_servo_send.get(websocket, (None, None))
+
+    if last_send_ts is not None and (now - last_send_ts) < SERVO_UPDATE_MIN_INTERVAL_SEC:
+        return
+
+    if last_sent_angles is None:
+        # Первая отправка этому устройству — шлём всё, дальше только дельты
+        delta = {str(i): a for i, a in enumerate(servo_angles)}
+    else:
+        delta = {str(i): a for i, a in enumerate(servo_angles) if a != last_sent_angles[i]}
+
+    if not delta:
+        # Ничего не изменилось — не спамим сеть, но время последней проверки обновляем
+        _last_servo_send[websocket] = (now, last_sent_angles)
+        return
+
+    servo_cmd = {
+        "type": "servo_update",
+        "angles": delta,
+        "face_detected": vision_result["face_detected"],
+        "face_offset": vision_result["face_offset"],
+        "dialog_active": vision_result.get("dialog_active", False)
+    }
+    await websocket.send_json(servo_cmd)
+    _last_servo_send[websocket] = (now, list(servo_angles))
 
 
 # ===== ПАНЕЛЬ УПРАВЛЕНИЯ =====
 
 @app.get("/panel", response_class=HTMLResponse)
-async def control_panel():
-    return PANEL_HTML
+async def control_panel(request: Request):
+    if PANEL_PASSWORD:
+        token = request.cookies.get(SESSION_COOKIE_NAME)
+        if not verify_session_token(token):
+            return RedirectResponse(url="/panel/login")
+        logout_link = '<a class="logout-link" href="/panel/logout">Выйти</a>'
+    else:
+        logout_link = ""
+    return PANEL_HTML.replace("{{LOGOUT_LINK}}", logout_link)
+
+
+@app.get("/panel/login", response_class=HTMLResponse)
+async def panel_login_form(error: str = None):
+    error_html = '<div class="error">Неверный пароль</div>' if error else ""
+    return LOGIN_HTML.replace("{{ERROR}}", error_html)
+
+
+@app.post("/panel/login")
+async def panel_login_submit(password: str = Form(...), remember: str = Form(None)):
+    if not PANEL_PASSWORD or password != PANEL_PASSWORD:
+        return RedirectResponse(url="/panel/login?error=1", status_code=303)
+
+    remember_me = bool(remember)
+    token = create_session_token(
+        remember=remember_me,
+        short_max_age_sec=SESSION_SHORT_MAX_AGE_SEC,
+        remember_max_age_sec=SESSION_REMEMBER_MAX_AGE_SEC,
+    )
+    max_age = SESSION_REMEMBER_MAX_AGE_SEC if remember_me else SESSION_SHORT_MAX_AGE_SEC
+
+    resp = RedirectResponse(url="/panel", status_code=303)
+    resp.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        max_age=max_age,
+        httponly=True,
+        samesite="lax",
+    )
+    return resp
+
+
+@app.get("/panel/logout")
+async def panel_logout():
+    resp = RedirectResponse(url="/panel/login")
+    resp.delete_cookie(SESSION_COOKIE_NAME)
+    return resp
+
+
+LOGIN_HTML = """
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Soren — Вход</title>
+<style>
+  :root{
+    --bg:#0d0f0d; --panel:#161916; --border:#2a2e2a; --text:#e8e6e0;
+    --text-faint:#8a8f87; --sage:#7a9b76; --amber:#d4a537; --error:#c96a5a;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+    background:var(--bg); color:var(--text);
+    font-family:'Segoe UI', system-ui, sans-serif;
+  }
+  .card{
+    width:100%; max-width:340px; background:var(--panel); border:1px solid var(--border);
+    border-radius:14px; padding:32px 28px;
+  }
+  h1{ font-size:18px; margin:0 0 4px; text-align:center; }
+  .subtitle{ font-size:12.5px; color:var(--text-faint); text-align:center; margin:0 0 24px; }
+  label{ font-size:12.5px; color:var(--text-faint); display:block; margin-bottom:6px; }
+  input[type="password"]{
+    width:100%; padding:11px 12px; border-radius:8px; border:1px solid var(--border);
+    background:#0d0f0d; color:var(--text); font-size:14px; margin-bottom:16px;
+  }
+  input[type="password"]:focus{ outline:none; border-color:var(--sage); }
+  .remember{ display:flex; align-items:center; gap:8px; margin-bottom:20px; font-size:13px; color:var(--text-faint); }
+  .remember input{ width:auto; }
+  button{
+    width:100%; padding:11px; border-radius:8px; border:none; cursor:pointer;
+    background:var(--sage); color:#0d0f0d; font-size:14px; font-weight:600;
+  }
+  button:hover{ opacity:0.9; }
+  .error{
+    background:rgba(201,106,90,0.12); border:1px solid rgba(201,106,90,0.4); color:var(--error);
+    font-size:12.5px; padding:8px 10px; border-radius:8px; margin-bottom:16px; text-align:center;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>🦉 Soren</h1>
+    <p class="subtitle">Панель мониторинга — вход</p>
+    {{ERROR}}
+    <form method="post" action="/panel/login">
+      <label for="password">Пароль</label>
+      <input type="password" id="password" name="password" autocomplete="current-password" autofocus required>
+      <label class="remember">
+        <input type="checkbox" name="remember" value="1">
+        Запомнить это устройство (90 дней)
+      </label>
+      <button type="submit">Войти</button>
+    </form>
+  </div>
+</body>
+</html>
+"""
 
 
 PANEL_HTML = """
@@ -591,6 +893,34 @@ PANEL_HTML = """
 
   .gesture-grid{ display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:14px; }
 
+  /* ===== CAMERA / FACE TRACKING ===== */
+  .camera-frame{
+    position:relative; width:100%; max-width:480px; aspect-ratio:4/3; margin:0 auto;
+    background:#050705; border:1px solid var(--border); border-radius:var(--radius);
+    overflow:hidden; display:flex; align-items:center; justify-content:center;
+  }
+  .camera-frame img{ width:100%; height:100%; object-fit:contain; display:block; }
+  .camera-placeholder{
+    font-family:'IBM Plex Mono', monospace; font-size:11px; letter-spacing:1px;
+    color:var(--text-faint); text-transform:uppercase; text-align:center; padding:0 20px;
+  }
+  .camera-badges{ display:flex; gap:10px; justify-content:center; margin-top:12px; flex-wrap:wrap; }
+  .camera-badge{
+    font-family:'IBM Plex Mono', monospace; font-size:10.5px; letter-spacing:1px; text-transform:uppercase;
+    padding:5px 11px; border-radius:12px; border:1px solid var(--border); color:var(--text-faint);
+    display:flex; align-items:center; gap:6px;
+  }
+  .camera-badge .dot{ width:6px; height:6px; border-radius:50%; background:var(--text-faint); }
+  .camera-badge.on{ color:var(--sage); border-color:rgba(122,155,118,.4); }
+  .camera-badge.on .dot{ background:var(--sage); box-shadow:0 0 6px var(--sage); }
+  .camera-badge.tracking.on{ color:var(--amber); border-color:rgba(212,165,55,.4); }
+  .camera-badge.tracking.on .dot{ background:var(--amber); box-shadow:0 0 6px var(--amber); }
+  .video-toggle{
+    display:flex; align-items:center; gap:6px; font-family:'IBM Plex Mono', monospace;
+    font-size:11px; letter-spacing:0.5px; color:var(--text-faint); cursor:pointer; user-select:none;
+  }
+  .video-toggle input{ cursor:pointer; }
+
   /* ===== SERVOS ===== */
   .servo-block-label{
     font-family:'IBM Plex Mono', monospace; font-size:10px; letter-spacing:1.5px; color:var(--text-faint);
@@ -631,6 +961,11 @@ PANEL_HTML = """
   }
   button.theme-btn:hover{ border-color:var(--amber-soft); color:var(--amber); background:var(--panel-alt); }
   button.theme-btn svg{ flex-shrink:0; }
+  .logout-link{
+    font-family:'IBM Plex Sans', sans-serif; font-size:12px; color:var(--text-faint);
+    text-decoration:none; padding:7px 12px; border-radius:var(--radius); border:1px solid transparent;
+  }
+  .logout-link:hover{ color:var(--amber); border-color:var(--border); }
   @media (max-width: 860px){
     .core-grid{ grid-template-columns:1fr; }
     .audio-grid{ grid-template-columns:1fr; }
@@ -681,6 +1016,29 @@ PANEL_HTML = """
         </svg>
         <span id="theme-label">Тёмная</span>
       </button>
+      {{LOGOUT_LINK}}
+    </div>
+  </div>
+
+  <!-- CAMERA / FACE TRACKING -->
+  <div class="section">
+    <div class="section-head">
+      <h2>Камера · Слежение за лицом (OpenCV)</h2>
+      <label class="video-toggle">
+        <input type="checkbox" id="video-toggle-checkbox" checked>
+        Показывать видео
+      </label>
+      <span class="tag" id="camera-fps-tag">ожидание кадров…</span>
+    </div>
+    <div class="camera-frame" id="camera-frame">
+      <div class="camera-placeholder" id="camera-placeholder">Нет видеопотока —<br>ждём кадры с ESP32</div>
+      <div class="camera-placeholder" id="camera-video-off" style="display:none;">Видео отключено —<br>слежение продолжает работать</div>
+      <img id="camera-feed" style="display:none;">
+    </div>
+    <div class="camera-badges">
+      <span class="camera-badge" id="badge-face"><span class="dot"></span>Лицо не найдено</span>
+      <span class="camera-badge tracking" id="badge-tracking"><span class="dot"></span>Слежение выключено</span>
+      <span class="camera-badge" id="badge-dialog"><span class="dot"></span>Диалог неактивен</span>
     </div>
   </div>
 
@@ -819,8 +1177,10 @@ PANEL_HTML = """
     document.getElementById('status-dot').classList.add('online');
     document.getElementById('status-text').textContent = 'ONLINE';
     log('WebSocket подключен');
+    ws.send(JSON.stringify({type:'hello', client:'panel'}));
     ws.send(JSON.stringify({type:'audio_mode'}));
     ws.send(JSON.stringify({type:'ai_mode'}));
+    ws.send(JSON.stringify({type:'video_pref', enabled: videoPrefEnabled}));
   };
   ws.onclose = () => {
     document.getElementById('status-dot').classList.remove('online');
@@ -829,6 +1189,10 @@ PANEL_HTML = """
   };
   ws.onmessage = (event) => {
     const data = JSON.parse(event.data);
+    if (data.type === 'video_frame') {
+      handleVideoFrame(data);
+      return; // не спамим системный журнал каждым кадром
+    }
     log('← ' + JSON.stringify(data));
     if (data.angles) updateServoDisplay(data.angles);
     if (data.emotion) log('Эмоция: ' + data.emotion);
@@ -839,7 +1203,87 @@ PANEL_HTML = """
     }
     if (data.type === 'ai_mode' && data.modes) { aiModes = data.modes; updateAIModeUI(); }
     if (data.modes && !data.type) { aiModes = data.modes; updateAIModeUI(); }
+    if (typeof data.dialog_active === 'boolean') updateDialogBadges(data.face_detected, data.dialog_active);
   };
+
+  // ===== Показывать/скрывать видео в панели (не влияет на слежение — только на вывод) =====
+  const VIDEO_PREF_KEY = 'soren_panel_show_video';
+  function getVideoPref() {
+    const stored = localStorage.getItem(VIDEO_PREF_KEY);
+    return stored === null ? true : stored === '1';
+  }
+  function setVideoPref(enabled) {
+    localStorage.setItem(VIDEO_PREF_KEY, enabled ? '1' : '0');
+  }
+  let videoPrefEnabled = getVideoPref();
+  let hasReceivedFrame = false;
+
+  function updateCameraFrameVisibility() {
+    const img = document.getElementById('camera-feed');
+    const waitingPlaceholder = document.getElementById('camera-placeholder');
+    const offPlaceholder = document.getElementById('camera-video-off');
+
+    if (!videoPrefEnabled) {
+      img.style.display = 'none';
+      waitingPlaceholder.style.display = 'none';
+      offPlaceholder.style.display = 'block';
+    } else if (hasReceivedFrame) {
+      img.style.display = 'block';
+      waitingPlaceholder.style.display = 'none';
+      offPlaceholder.style.display = 'none';
+    } else {
+      img.style.display = 'none';
+      waitingPlaceholder.style.display = 'block';
+      offPlaceholder.style.display = 'none';
+    }
+  }
+
+  const videoToggleCheckbox = document.getElementById('video-toggle-checkbox');
+  videoToggleCheckbox.checked = videoPrefEnabled;
+  updateCameraFrameVisibility();
+  videoToggleCheckbox.addEventListener('change', () => {
+    videoPrefEnabled = videoToggleCheckbox.checked;
+    setVideoPref(videoPrefEnabled);
+    updateCameraFrameVisibility();
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({type:'video_pref', enabled: videoPrefEnabled}));
+    }
+  });
+
+  let lastFrameTs = 0, frameCount = 0, fpsWindowStart = Date.now();
+  function handleVideoFrame(data) {
+    const img = document.getElementById('camera-feed');
+    img.src = 'data:image/jpeg;base64,' + data.image;
+    hasReceivedFrame = true;
+    updateCameraFrameVisibility();
+
+    updateDialogBadges(data.face_detected, data.dialog_active);
+
+    frameCount++;
+    const now = Date.now();
+    if (now - fpsWindowStart >= 1000) {
+      const facesTxt = data.faces_count > 1 ? (', лиц в кадре: ' + data.faces_count) : '';
+      document.getElementById('camera-fps-tag').textContent = frameCount + ' fps (панель)' + facesTxt;
+      frameCount = 0;
+      fpsWindowStart = now;
+    }
+  }
+
+  function updateDialogBadges(faceDetected, dialogActive) {
+    const faceBadge = document.getElementById('badge-face');
+    const trackBadge = document.getElementById('badge-tracking');
+    const dialogBadge = document.getElementById('badge-dialog');
+
+    faceBadge.classList.toggle('on', !!faceDetected);
+    faceBadge.childNodes[1].textContent = faceDetected ? ' Лицо найдено' : ' Лицо не найдено';
+
+    const tracking = !!faceDetected && !!dialogActive;
+    trackBadge.classList.toggle('on', tracking);
+    trackBadge.childNodes[1].textContent = tracking ? ' Слежение активно' : ' Слежение выключено';
+
+    dialogBadge.classList.toggle('on', !!dialogActive);
+    dialogBadge.childNodes[1].textContent = dialogActive ? ' Диалог активен' : ' Диалог неактивен';
+  }
 
   async function setAIMode(module, mode) {
     log(`Переключение ${module.toUpperCase()} → ${mode}…`);
