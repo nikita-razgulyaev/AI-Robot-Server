@@ -76,13 +76,33 @@ FREETTS_PITCH = _config.get("tts", {}).get("edge_pitch", "+15Hz")
 
 # ========== LLM ==========
 LLM_MODE = _config.get("llm", {}).get("mode", "local")
-LLM_MODEL_PATH = MODELS_DIR / "qwen2.5-7b-instruct-Q4_K_M.gguf"
+
+# Путь к локальной модели (.gguf) — берётся строго из config.yaml (llm.local_model_path),
+# никакого захардкоженного имени файла по умолчанию. Обязателен, только если реально
+# используется локальный режим — если сейчас mode="cloud", требовать его смысла нет.
+_LOCAL_MODEL_PATH_STR = _config.get("llm", {}).get("local_model_path")
+if LLM_MODE == "local" and not _LOCAL_MODEL_PATH_STR:
+    raise ValueError(
+        "config.yaml: llm.mode = 'local', но llm.local_model_path не задан. "
+        "Укажи путь к .gguf файлу локальной модели (например: models/qwen2.5-7b-instruct-Q4_K_M.gguf)."
+    )
+LLM_MODEL_PATH = (BASE_DIR / _LOCAL_MODEL_PATH_STR) if _LOCAL_MODEL_PATH_STR else None
+
 LLM_N_CTX = int(_config.get("llm", {}).get("n_ctx", 4096))
 LLM_N_THREADS = int(_config.get("llm", {}).get("n_threads", 4))
 LLM_TEMPERATURE = float(_config.get("llm", {}).get("temperature", 0.6))
 LLM_REPEAT_PENALTY = float(_config.get("llm", {}).get("repeat_penalty", 1.15))
 GITHUB_MODELS_KEY = os.getenv("GITHUB_MODELS_KEY", _config.get("llm", {}).get("cloud_api_key", ""))
-GITHUB_MODELS_NAME = _config.get("llm", {}).get("cloud_model", "gpt-4o-mini")
+
+# Имя облачной модели — тоже строго из config.yaml (llm.cloud_model), без захардкоженного
+# "gpt-4o-mini" по умолчанию. Обязательно, только если реально используется cloud-режим.
+GITHUB_MODELS_NAME = _config.get("llm", {}).get("cloud_model")
+if LLM_MODE == "cloud" and not GITHUB_MODELS_NAME:
+    raise ValueError(
+        "config.yaml: llm.mode = 'cloud', но llm.cloud_model не задан. "
+        "Укажи имя облачной модели (например: gpt-4o-mini)."
+    )
+GITHUB_MODELS_NAME = GITHUB_MODELS_NAME or ""
 
 # Vision
 YOLO_MODEL = MODELS_DIR / "yolov8n.pt"
@@ -194,7 +214,7 @@ ANIMATIONS = {
 # Один общий пароль (это личный робот, а не сервис на много пользователей).
 # Пусто по умолчанию = авторизация выключена (как было раньше — для удобства
 # первоначальной настройки, включается явно заданием пароля в .env).
-PANEL_PASSWORD = os.getenv("PANEL_PASSWORD", "")
+PANEL_PASSWORD = os.getenv("PANEL_PASSWORD", "1234")
 
 # Общий секрет, который ESP32 присылает вместе с "ping" для подтверждения,
 # что это доверенное устройство, а не случайный WS-клиент, притворяющийся им.

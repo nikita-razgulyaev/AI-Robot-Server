@@ -9,7 +9,7 @@ import shutil
 from pathlib import Path
 from config.settings import (
     TTS_MODE, AUDIO_CACHE_DIR, SAMPLE_RATE,
-    FREETTS_VOICE, FREETTS_SPEED
+    FREETTS_VOICE, FREETTS_SPEED, SILERO_SPEAKER
 )
 
 logger = logging.getLogger(__name__)
@@ -126,6 +126,7 @@ class LocalTTSEngine:
         self.device = None
         self.model = None
         self.sample_rate = 48000
+        self.default_speaker = SILERO_SPEAKER
         self._load_model()
 
     def _load_model(self):
@@ -158,11 +159,14 @@ class LocalTTSEngine:
             logger.error(f"Ошибка загрузки Silero: {e}")
             self.model = None
 
-    def synthesize(self, text: str, speaker: str = 'xenia') -> bytes:
+    def synthesize(self, text: str, speaker: str = None) -> bytes:
         try:
             if self.model is None:
                 logger.error("Silero модель не загружена")
                 return b""
+
+            # Если голос не передан явно — берём из config.yaml (tts.silero_speaker)
+            speaker = speaker or self.default_speaker
 
             import torch
             audio = self.model.apply_tts(
@@ -181,11 +185,11 @@ class LocalTTSEngine:
             logger.error(f"Ошибка TTS: {e}")
             return b""
 
-    def synthesize_to_wav(self, text: str, output_path: Path = None, speaker: str = 'xenia') -> Path:
+    def synthesize_to_wav(self, text: str, output_path: Path = None, speaker: str = None) -> Path:
         if output_path is None:
             output_path = AUDIO_CACHE_DIR / f"tts_local_{hash(text)}.wav"
 
-        pcm_data = self.synthesize(text, speaker)
+        pcm_data = self.synthesize(text, speaker or self.default_speaker)
         if not pcm_data:
             return None
 
@@ -237,8 +241,9 @@ class TTSEngine:
     def get_mode(self) -> str:
         return self.mode
 
-    def synthesize(self, text: str, speaker: str = 'xenia') -> bytes:
-        """В cloud-режиме игнорируем speaker из Silero, используем FREETTS_VOICE"""
+    def synthesize(self, text: str, speaker: str = None) -> bytes:
+        """В cloud-режиме игнорируем speaker из Silero, используем FREETTS_VOICE.
+        В local-режиме speaker=None -> берётся SILERO_SPEAKER из config.yaml."""
         if self.mode == "cloud" and self.cloud_engine:
             # Не передаём speaker — FreeTTSEngine использует self.voice (FREETTS_VOICE)
             return self.cloud_engine.synthesize(text)
@@ -248,7 +253,7 @@ class TTSEngine:
             logger.error("TTS движок не инициализирован")
             return b""
 
-    def synthesize_to_wav(self, text: str, output_path: Path = None, speaker: str = 'xenia') -> Path:
+    def synthesize_to_wav(self, text: str, output_path: Path = None, speaker: str = None) -> Path:
         if self.mode == "cloud" and self.cloud_engine:
             return self.cloud_engine.synthesize_to_wav(text, output_path)
         elif self.local_engine:

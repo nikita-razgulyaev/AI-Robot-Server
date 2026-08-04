@@ -163,6 +163,8 @@ class GitHubModelsLLMEngine:
 
         if not self.api_key:
             logger.warning("GITHUB_MODELS_KEY не задан! Облачный LLM не будет работать.")
+        if not self.model:
+            logger.warning("llm.cloud_model не задан в config.yaml! Облачный LLM не будет работать.")
         logger.info(f"☁️ Облачный LLM (GitHub Models) инициализирован: {self.model}")
 
     def _load_system_prompt(self):
@@ -376,6 +378,14 @@ class LocalLLMEngine:
                 logger.error(f"Ошибка загрузки эмоций: {e}")
 
     def _load_model(self):
+        if LLM_MODEL_PATH is None:
+            logger.error(
+                "LLM_MODEL_PATH не задан (llm.local_model_path отсутствует в config.yaml) — "
+                "локальная модель не может быть загружена."
+            )
+            self.model = None
+            return
+
         logger.info(f"Загрузка LLM: {LLM_MODEL_PATH}")
         if not LLM_MODEL_PATH.exists():
             logger.error(f"Модель LLM не найдена: {LLM_MODEL_PATH}")
@@ -546,11 +556,14 @@ class LLMEngine:
     def get_mode(self) -> str:
         return self.mode
 
-    def generate(self, user_message: str, vision_context: str = "") -> dict:
-        memory_context = ""
-        if self.memory:
+    def generate(self, user_message: str, vision_context: str = "", memory_context: Optional[str] = None) -> dict:
+        # Если вызывающий код (RobotBrain._build_memory_context) уже собрал контекст
+        # памяти (включая релевантные долгосрочные воспоминания из Qdrant) — используем
+        # его. Иначе (например, при прямом вызове LLMEngine в тестах) строим сами,
+        # но это более простой вариант — без семантического поиска по LTM.
+        if memory_context is None and self.memory:
             memory_context = self.memory.get_context_for_llm()
-            self.memory.record_interaction(user_message, "", "calm")
+        memory_context = memory_context or ""
 
         if self.mode == "cloud" and self.cloud_engine:
             result = self.cloud_engine.generate(user_message, vision_context, memory_context)

@@ -244,7 +244,7 @@ class RobotBrain:
         memory_context = self._build_memory_context(user_text)
 
         logger.info("Генерация ответа Сорена...")
-        llm_result = self.llm.generate(user_text, self.vision_context)
+        llm_result = self.llm.generate(user_text, self.vision_context, memory_context)
         response_text = llm_result["text"]
         action = llm_result.get("action")
         emotion = llm_result.get("emotion", "calm")
@@ -314,7 +314,7 @@ class RobotBrain:
         # Собираем контекст памяти
         memory_context = self._build_memory_context(user_text)
 
-        llm_result = self.llm.generate(user_text, self.vision_context)
+        llm_result = self.llm.generate(user_text, self.vision_context, memory_context)
         emotion = llm_result.get("emotion", "calm")
         servo_angles = self.emotion_engine.get_servo_angles(emotion)
         eye_led = self.emotion_engine.get_eye_led(emotion)
