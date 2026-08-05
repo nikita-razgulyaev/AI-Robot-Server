@@ -188,23 +188,27 @@ async def speak_text(text: str = Form(...)):
         servo_angles = robot_brain.emotion_engine.get_servo_angles(emotion)
         eye_led = robot_brain.emotion_engine.get_eye_led(emotion)
 
+        # Текст от LLM уже готов — даже если синтез речи не удастся, ответ всё равно
+        # должен дойти до чата (просто без озвучки), а не теряться целиком.
         tts_audio = robot_brain.tts.synthesize(response_text)
         if not tts_audio:
-            return JSONResponse({"status": "error", "message": "Ошибка синтеза речи"})
+            logger.warning("TTS не вернул аудио — отправляем текстовый ответ без озвучки")
 
         if action:
             asyncio.create_task(robot_brain.servos.play_animation(action))
         else:
             robot_brain.servos.set_all_servos(servo_angles)
 
-        wav_buffer = io.BytesIO()
-        with wave.open(wav_buffer, 'wb') as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(48000)
-            wf.writeframes(tts_audio)
-        wav_bytes = wav_buffer.getvalue()
-        audio_b64 = base64.b64encode(wav_bytes).decode('utf-8')
+        audio_b64 = ""
+        if tts_audio:
+            wav_buffer = io.BytesIO()
+            with wave.open(wav_buffer, 'wb') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(48000)
+                wf.writeframes(tts_audio)
+            wav_bytes = wav_buffer.getvalue()
+            audio_b64 = base64.b64encode(wav_bytes).decode('utf-8')
 
         return JSONResponse({
             "status": "ok",
@@ -216,6 +220,7 @@ async def speak_text(text: str = Form(...)):
             "servo_angles": servo_angles,
             "eye_led": eye_led,
             "audio_base64": audio_b64,
+            "tts_failed": not bool(tts_audio),
             "audio_input_mode": audio_input_mode,
             "audio_output_mode": audio_output_mode,
             "ai_modes": robot_brain.get_modes()
@@ -1246,6 +1251,12 @@ PANEL_HTML = """
       updateAudioModeUI();
     }
     if (data.type === 'ai_mode' && data.modes) { aiModes = data.modes; updateAIModeUI(); }
+    // Ответ на команду {type:'text'} (чат при audioOutputMode === 'robot') — у него нет
+    // поля type, только status/response, поэтому раньше молча терялся тут и не попадал в чат.
+    if (!data.type && data.status === 'ok' && typeof data.response === 'string') {
+      addMessage('robot', data.response, data.emotion);
+      if (data.ai_modes) { aiModes = data.ai_modes; updateAIModeUI(); }
+    }
     if (data.modes && !data.type) { aiModes = data.modes; updateAIModeUI(); }
     if (typeof data.dialog_active === 'boolean') updateDialogBadges(data.face_detected, data.dialog_active);
   };
@@ -1492,6 +1503,7 @@ PANEL_HTML = """
       if (data.status === 'ok') {
         addMessage('robot', data.response, data.emotion);
         if (data.audio_base64) playAudio(data.audio_base64);
+        else if (data.tts_failed) log('⚠ Синтез речи не удался — ответ показан без озвучки');
         if (data.ai_modes) { aiModes = data.ai_modes; updateAIModeUI(); }
       } else addMessage('robot', 'Ошибка: ' + (data.message || 'неизвестная'));
     } catch(e) { log('Ошибка сети: ' + e); }

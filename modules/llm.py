@@ -1,4 +1,4 @@
-"""LLM модуль — Сорен (local llama.cpp / cloud GitHub Models) с Vector RAG, памятью и LoRA"""
+"""LLM модуль — Сорен (local llama.cpp / cloud Hugging Face Inference Providers) с Vector RAG, памятью и LoRA"""
 import logging
 import json
 import re
@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import List, Dict, Optional
 from config.settings import (
     LLM_MODE, LLM_MODEL_PATH, LLM_N_CTX, LLM_N_THREADS, LLM_TEMPERATURE, LLM_REPEAT_PENALTY,
-    CHARACTER_DIR, RAG_TOP_K, GITHUB_MODELS_KEY, GITHUB_MODELS_NAME,
-    LORA_ENABLED, LORA_PATH, LORA_SCALE
+    CHARACTER_DIR, RAG_TOP_K, CLOUD_API_KEY, CLOUD_MODEL_NAME,
+    LORA_ENABLED, LORA_PATH, LORA_SCALE, FAST_MODE
 )
 from modules.qdrant_singleton import get_qdrant_client, get_encoder, encode_text
 
@@ -141,15 +141,16 @@ class KeywordRAG:
         return [chunk["text"] for _, chunk in scored[:top_k]]
 
 
-# === GitHub Models (облачный LLM) ===
+# === Облачный LLM через Hugging Face Inference Providers (OpenAI-совместимый роутер) ===
 
-class GitHubModelsLLMEngine:
-    """Облачный LLM через GitHub Models API"""
+class CloudLLMEngine:
+    """Облачный LLM через Hugging Face Inference Providers — роутер сам выбирает
+    самого быстрого провайдера (Cerebras/Groq/и др.) под нужную модель"""
 
     def __init__(self, memory_manager=None):
-        self.api_key = GITHUB_MODELS_KEY
-        self.model = GITHUB_MODELS_NAME
-        self.base_url = "https://models.inference.ai.azure.com/chat/completions"
+        self.api_key = CLOUD_API_KEY
+        self.model = CLOUD_MODEL_NAME
+        self.base_url = "https://router.huggingface.co/v1/chat/completions"
         self.conversation_history = []
         self.system_prompt = ""
         self.vector_rag = None
@@ -162,21 +163,32 @@ class GitHubModelsLLMEngine:
         self._load_emotion_keywords()
 
         if not self.api_key:
-            logger.warning("GITHUB_MODELS_KEY не задан! Облачный LLM не будет работать.")
+            logger.warning("HF_TOKEN не задан! Облачный LLM не будет работать.")
         if not self.model:
             logger.warning("llm.cloud_model не задан в config.yaml! Облачный LLM не будет работать.")
-        logger.info(f"☁️ Облачный LLM (GitHub Models) инициализирован: {self.model}")
+        logger.info(f"☁️ Облачный LLM (Hugging Face Inference Providers) инициализирован: {self.model}")
 
     def _load_system_prompt(self):
-        prompt_path = CHARACTER_DIR / "Soren.txt"
+        # fast_mode: короткий промпт (character/Soren_short.txt) — без полного канона,
+        # меньше токенов на обработку промпта -> быстрее ответ. Иначе — полный Soren.txt.
+        prompt_filename = "Soren_short.txt" if FAST_MODE else "Soren.txt"
+        prompt_path = CHARACTER_DIR / prompt_filename
         if prompt_path.exists():
             with open(prompt_path, 'r', encoding='utf-8') as f:
                 self.system_prompt = f.read()
-            logger.info(f"System prompt загружен: {len(self.system_prompt)} chars")
+            logger.info(f"System prompt загружен ({prompt_filename}): {len(self.system_prompt)} chars")
         else:
             self.system_prompt = "Ты — Сорен, амбарная сова, Главный Страж. Отвечай мудро и сдержанно."
 
     def _load_rag(self):
+        # fast_mode: RAG полностью выключен — не грузим ни Qdrant, ни
+        # sentence-transformers энкодер (самая тяжёлая часть инициализации),
+        # ни файл канона. self.vector_rag/keyword_rag остаются None,
+        # _build_messages/_build_prompt ниже просто не делают поиск.
+        if FAST_MODE:
+            self.vector_rag = None
+            self.keyword_rag = None
+            return
         self.vector_rag = VectorRAG()
         rag_path = CHARACTER_DIR / "Soren_rag_chunks.json"
         if not rag_path.exists():
@@ -250,7 +262,7 @@ class GitHubModelsLLMEngine:
     def generate(self, user_message: str, vision_context: str = "", memory_context: str = "") -> dict:
         if not self.api_key:
             return {
-                "text": "GITHUB_MODELS_KEY не задан. Получи токен на https://github.com/settings/tokens и добавь в .env",
+                "text": "HF_TOKEN не задан. Получи токен на https://huggingface.co/settings/tokens (с правом Make calls to Inference Providers) и добавь в .env",
                 "action": None,
                 "emotion": "calm"
             }
@@ -268,7 +280,7 @@ class GitHubModelsLLMEngine:
             }
 
             json_body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
-            logger.info(f"GitHub Models запрос: model={self.model}, messages={len(messages)}")
+            logger.info(f"HF Inference Providers запрос: model={self.model}, messages={len(messages)}")
 
             response = requests.post(
                 self.base_url,
@@ -280,7 +292,7 @@ class GitHubModelsLLMEngine:
                 timeout=60
             )
 
-            logger.info(f"GitHub Models ответ: status={response.status_code}")
+            logger.info(f"HF Inference Providers ответ: status={response.status_code}")
 
             if response.status_code == 200:
                 data = response.json()
@@ -291,7 +303,7 @@ class GitHubModelsLLMEngine:
                     error_msg = error_data.get("error", {}).get("message", f"HTTP {response.status_code}")
                 except:
                     error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
-                logger.error(f"GitHub Models ошибка: {error_msg}")
+                logger.error(f"HF Inference Providers ошибка: {error_msg}")
                 return {
                     "text": f"*(пауза)* ... Прости, друг. Ветер сменил направление. Повтори, пожалуйста. (Ошибка: {error_msg})",
                     "action": None,
@@ -350,15 +362,26 @@ class LocalLLMEngine:
         self._load_model()
 
     def _load_system_prompt(self):
-        prompt_path = CHARACTER_DIR / "Soren.txt"
+        # fast_mode: короткий промпт (character/Soren_short.txt) — без полного канона,
+        # меньше токенов на обработку промпта -> быстрее ответ. Иначе — полный Soren.txt.
+        prompt_filename = "Soren_short.txt" if FAST_MODE else "Soren.txt"
+        prompt_path = CHARACTER_DIR / prompt_filename
         if prompt_path.exists():
             with open(prompt_path, 'r', encoding='utf-8') as f:
                 self.system_prompt = f.read()
-            logger.info(f"System prompt загружен: {len(self.system_prompt)} chars")
+            logger.info(f"System prompt загружен ({prompt_filename}): {len(self.system_prompt)} chars")
         else:
             self.system_prompt = "Ты — Сорен, амбарная сова, Главный Страж. Отвечай мудро и сдержанно."
 
     def _load_rag(self):
+        # fast_mode: RAG полностью выключен — не грузим ни Qdrant, ни
+        # sentence-transformers энкодер (самая тяжёлая часть инициализации),
+        # ни файл канона. self.vector_rag/keyword_rag остаются None,
+        # _build_messages/_build_prompt ниже просто не делают поиск.
+        if FAST_MODE:
+            self.vector_rag = None
+            self.keyword_rag = None
+            return
         self.vector_rag = VectorRAG()
         rag_path = CHARACTER_DIR / "Soren_rag_chunks.json"
         if not rag_path.exists():
@@ -530,8 +553,8 @@ class LLMEngine:
         self.memory = memory_manager
 
         if self.mode == "cloud":
-            self.cloud_engine = GitHubModelsLLMEngine(memory_manager)
-            logger.info("☁️ LLM режим: ОБЛАЧНЫЙ (GitHub Models)")
+            self.cloud_engine = CloudLLMEngine(memory_manager)
+            logger.info("☁️ LLM режим: ОБЛАЧНЫЙ (Hugging Face Inference Providers)")
         else:
             self.local_engine = LocalLLMEngine(memory_manager)
             logger.info("💻 LLM режим: ЛОКАЛЬНЫЙ (llama.cpp + LoRA)")
@@ -544,7 +567,7 @@ class LLMEngine:
         self.mode = mode
         if mode == "cloud":
             if self.cloud_engine is None:
-                self.cloud_engine = GitHubModelsLLMEngine(self.memory)
+                self.cloud_engine = CloudLLMEngine(self.memory)
             self.local_engine = None
             logger.info("☁️ LLM переключён на ОБЛАЧНЫЙ")
         else:

@@ -1,5 +1,19 @@
 # Конфигурация Сорена v3.5 — Vector RAG + Qdrant + LoRA
 
+# === Производительность ===
+# fast_mode: true — максимальная скорость ответа. Отключает всё, что не
+# обязательно для самого факта диалога и его тратит время/диск:
+#   - Vector RAG (Qdrant + sentence-transformers энкодер, канон мира)
+#   - Долгосрочная память (Qdrant: диалоги/факты/эмоциональные моменты)
+#   - Сохранение/чтение JSON-профиля пользователя на диск
+#   - Полный системный промпт (Soren.txt, ~9700 симв.) — вместо него
+#     используется короткий (character/Soren_short.txt)
+# Остаётся только короткая память последних реплик в RAM (нужна, чтобы Сорен
+# не забывал, о чём речь в пределах текущего разговора) — она не пишется на
+# диск и не измеряется в него, поэтому не влияет на скорость ответа.
+performance:
+    fast_mode: true
+
 server:
     host: "0.0.0.0"
     port: 8765
@@ -11,8 +25,8 @@ qdrant:
 
 # === Память ===
 memory:
-    short_term_max: 10 # Макс. реплик в RAM
-    long_term_enabled: true # Включить Qdrant LTM
+    short_term_max: 6 # Макс. реплик в RAM (короткая история для связности диалога)
+    long_term_enabled: false # Qdrant LTM выключен — при fast_mode: true игнорируется в любом случае
     qdrant_host: "localhost"
     qdrant_port: 6333
     collections:
@@ -42,7 +56,7 @@ stt:
 
 # === TTS ===
 tts:
-    mode: "local" # local / cloud / edge
+    mode: "cloud" # local / cloud / edge — облако (edge-tts): не грузит CPU ноутбука синтезом речи
     silero_speaker: "aidar"
     silero_pitch_semitones: 1.5
     silero_rate: 1.05
@@ -52,14 +66,17 @@ tts:
 
 # === LLM ===
 llm:
-    mode: "local" # local / cloud
+    mode: "cloud" # local / cloud — облако (Hugging Face Inference Providers): секунды на ответ вместо минуты на слабом CPU
     local_model_path: "models/qwen2.5-7b-instruct-Q4_K_M.gguf" # старая рабочая база (дообученная была дефектной, откат)
-    n_ctx: 8192 # системный промпт (~9700 симв.) + RAG почти не оставляли места под ответ при 4096
+    n_ctx: 2048 # при fast_mode: true промпт короткий (Soren_short.txt, без RAG) — большой контекст больше не нужен
     n_threads: 4
     temperature: 0.6
     repeat_penalty: 1.15
-    cloud_model: "gpt-4o-mini"
-    cloud_api_key: "" # Берётся из .env GITHUB_MODELS_KEY
+    # Hugging Face Inference Providers: "<model_id>:<провайдер|fastest|cheapest>".
+    # Llama 3.3 70B Instruct — НЕ reasoning-модель (в отличие от gpt-oss), отвечает сразу,
+    # без скрытой цепочки рассуждений. :fastest уводит на Cerebras/Groq (сотни-тысячи ток/сек).
+    cloud_model: "meta-llama/Llama-3.3-70B-Instruct:fastest"
+    cloud_api_key: "" # Берётся из .env HF_TOKEN (huggingface.co/settings/tokens, право "Make calls to Inference Providers")
 
 # === Vision ===
 vision:

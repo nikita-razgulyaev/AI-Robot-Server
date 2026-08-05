@@ -18,7 +18,8 @@ torch==2.3.1
 torchaudio==2.3.1
 
 # TTS - FreeTTS (edge-tts облачный, бесплатный)
-edge-tts==6.1.12
+edge-tts>=7.2.8 # неофициальный клиент, Microsoft периодически меняет защиту (Sec-MS-GEC) —
+                 # держим свежую версию, а не жёсткий пин, чтобы фиксы приходили сами
 
 # LLM - Local Language Model
 llama-cpp-python==0.2.85

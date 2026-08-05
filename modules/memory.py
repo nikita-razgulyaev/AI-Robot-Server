@@ -22,7 +22,7 @@ from dataclasses import dataclass, asdict, field
 from config.settings import (
     MEMORY_DIR, SHORT_TERM_MEMORY_MAX, LONG_TERM_MEMORY_ENABLED,
     QDRANT_HOST, QDRANT_PORT, QDRANT_COLLECTIONS, QDRANT_PATH,
-    RAG_ENCODER_MODEL
+    RAG_ENCODER_MODEL, FAST_MODE
 )
 from modules.qdrant_singleton import get_qdrant_client, encode_text
 
@@ -334,6 +334,9 @@ class MemoryManager:
         self.profile = self._load_profile()
 
     def _load_profile(self) -> EmotionalProfile:
+        # fast_mode: не читаем ничего с диска — просто пустой профиль в RAM.
+        if FAST_MODE:
+            return EmotionalProfile(user_id=self.user_id)
         profile_path = MEMORY_DIR / f"user_{self.user_id}_profile.json"
         if profile_path.exists():
             try:
@@ -345,6 +348,9 @@ class MemoryManager:
         return EmotionalProfile(user_id=self.user_id)
 
     def save_profile(self):
+        # fast_mode: не пишем ничего на диск — ноль I/O на каждую реплику.
+        if FAST_MODE:
+            return
         profile_path = MEMORY_DIR / f"user_{self.user_id}_profile.json"
         try:
             with open(profile_path, 'w', encoding='utf-8') as f:
@@ -354,11 +360,16 @@ class MemoryManager:
 
     def record_interaction(self, user_text: str, soren_text: str, emotion: str):
         """Записывает взаимодействие в обе системы памяти"""
-        now = datetime.now().isoformat()
-
-        # Краткосрочная
+        # Краткосрочная — держим всегда (RAM only, нужна для связности диалога
+        # в пределах текущей сессии, никакой записи на диск/в БД тут нет).
         self.short_term.add_turn("user", user_text)
         self.short_term.add_turn("assistant", soren_text, emotion)
+
+        if FAST_MODE:
+            # Никакого профиля, привычек, фактов, Qdrant — максимальная скорость.
+            return
+
+        now = datetime.now().isoformat()
 
         # Обновляем профиль
         self.profile.last_seen = now
@@ -496,10 +507,15 @@ class MemoryManager:
 
     def get_context_for_llm(self) -> str:
         """Формирует контекст для LLM из памяти"""
-        parts = []
-
         # Краткосрочная память
         stm = self.short_term.get_context()
+
+        if FAST_MODE:
+            # Только последние реплики текущего диалога — без профиля,
+            # доминантных эмоций и привычек (это лишние токены в промпте).
+            return f"Последние реплики:\n{stm}" if stm else ""
+
+        parts = []
         if stm:
             parts.append(f"Последние реплики:\n{stm}")
 

@@ -15,6 +15,7 @@ from modules.servo_controller import ServoController
 from modules.memory import MemoryManager
 from config.settings import (
     CHARACTER_DIR,
+    FAST_MODE,
     FACE_TRACKING_ENABLED,
     DIALOG_ACTIVE_TIMEOUT_SEC,
     PROVISIONAL_DIALOG_TIMEOUT_SEC,
@@ -285,11 +286,16 @@ class RobotBrain:
         }
 
     def _build_memory_context(self, user_text: str) -> str:
-        """Собирает полный контекст из краткосрочной и долгосрочной памяти"""
-        parts = []
-
-        # Краткосрочная память
+        """Собирает контекст для LLM из памяти"""
+        # Краткосрочная память — последние реплики текущей сессии (RAM, не хранилище)
         stm = self.memory.short_term.get_context()
+
+        if FAST_MODE:
+            # Ничего лишнего: ни RAG-воспоминаний, ни эмоционального профиля,
+            # ни приветствий по времени — только сама история текущего диалога.
+            return f"Последние реплики:\n{stm}" if stm else ""
+
+        parts = []
         if stm:
             parts.append(f"Последние реплики:\n{stm}")
 

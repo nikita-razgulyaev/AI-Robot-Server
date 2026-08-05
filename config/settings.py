@@ -15,6 +15,12 @@ if CONFIG_PATH.exists():
     with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
         _config = yaml.safe_load(f)
 
+# === ПРОИЗВОДИТЕЛЬНОСТЬ ===
+# fast_mode: true — отключает Vector RAG, долгосрочную память (Qdrant) и
+# чтение/запись JSON-профиля на диск; system prompt берётся короткий
+# (character/Soren_short.txt вместо Soren.txt). См. комментарий в config.yaml.
+FAST_MODE = bool(_config.get("performance", {}).get("fast_mode", False))
+
 # === Character / Knowledge System ===
 CHARACTER_DIR = BASE_DIR / "character"
 RAG_TOP_K = int(os.getenv("RAG_TOP_K", "3"))
@@ -27,7 +33,8 @@ RAG_ENCODER_MODEL = _config.get("qdrant", {}).get("encoder_model", "sentence-tra
 MEMORY_DIR = BASE_DIR / "memory"
 MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 SHORT_TERM_MEMORY_MAX = _config.get("memory", {}).get("short_term_max", 10)
-LONG_TERM_MEMORY_ENABLED = _config.get("memory", {}).get("long_term_enabled", True)
+# fast_mode принудительно выключает Qdrant LTM, даже если в config.yaml забыли поставить false
+LONG_TERM_MEMORY_ENABLED = False if FAST_MODE else _config.get("memory", {}).get("long_term_enabled", True)
 QDRANT_HOST = _config.get("memory", {}).get("qdrant_host", "localhost")
 QDRANT_PORT = _config.get("memory", {}).get("qdrant_port", 6333)
 QDRANT_COLLECTIONS = _config.get("memory", {}).get("collections", {
@@ -92,17 +99,19 @@ LLM_N_CTX = int(_config.get("llm", {}).get("n_ctx", 4096))
 LLM_N_THREADS = int(_config.get("llm", {}).get("n_threads", 4))
 LLM_TEMPERATURE = float(_config.get("llm", {}).get("temperature", 0.6))
 LLM_REPEAT_PENALTY = float(_config.get("llm", {}).get("repeat_penalty", 1.15))
-GITHUB_MODELS_KEY = os.getenv("GITHUB_MODELS_KEY", _config.get("llm", {}).get("cloud_api_key", ""))
+CLOUD_API_KEY = os.getenv("HF_TOKEN", _config.get("llm", {}).get("cloud_api_key", ""))
 
 # Имя облачной модели — тоже строго из config.yaml (llm.cloud_model), без захардкоженного
-# "gpt-4o-mini" по умолчанию. Обязательно, только если реально используется cloud-режим.
-GITHUB_MODELS_NAME = _config.get("llm", {}).get("cloud_model")
-if LLM_MODE == "cloud" and not GITHUB_MODELS_NAME:
+# значения по умолчанию. Обязательно, только если реально используется cloud-режим.
+# Формат — как в Hugging Face Inference Providers: "<model_id>:<провайдер|fastest|cheapest>",
+# например "openai/gpt-oss-120b:fastest".
+CLOUD_MODEL_NAME = _config.get("llm", {}).get("cloud_model")
+if LLM_MODE == "cloud" and not CLOUD_MODEL_NAME:
     raise ValueError(
         "config.yaml: llm.mode = 'cloud', но llm.cloud_model не задан. "
-        "Укажи имя облачной модели (например: gpt-4o-mini)."
+        "Укажи имя облачной модели (например: openai/gpt-oss-120b:fastest)."
     )
-GITHUB_MODELS_NAME = GITHUB_MODELS_NAME or ""
+CLOUD_MODEL_NAME = CLOUD_MODEL_NAME or ""
 
 # Vision
 YOLO_MODEL = MODELS_DIR / "yolov8n.pt"
@@ -214,7 +223,7 @@ ANIMATIONS = {
 # Один общий пароль (это личный робот, а не сервис на много пользователей).
 # Пусто по умолчанию = авторизация выключена (как было раньше — для удобства
 # первоначальной настройки, включается явно заданием пароля в .env).
-PANEL_PASSWORD = os.getenv("PANEL_PASSWORD", "1234")
+PANEL_PASSWORD = os.getenv("PANEL_PASSWORD", "")
 
 # Общий секрет, который ESP32 присылает вместе с "ping" для подтверждения,
 # что это доверенное устройство, а не случайный WS-клиент, притворяющийся им.
