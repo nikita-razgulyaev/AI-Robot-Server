@@ -13,9 +13,13 @@ from modules.vision import VisionEngine
 from modules.audio_buffer import AudioBuffer
 from modules.servo_controller import ServoController
 from modules.memory import MemoryManager
+from modules import memory_flags
 from config.settings import (
     CHARACTER_DIR,
     FAST_MODE,
+    LLM_LOCAL_MODELS,
+    LLM_CLOUD_MODELS,
+    WHISPER_MODELS,
     FACE_TRACKING_ENABLED,
     DIALOG_ACTIVE_TIMEOUT_SEC,
     PROVISIONAL_DIALOG_TIMEOUT_SEC,
@@ -184,6 +188,51 @@ class RobotBrain:
             "llm": self.llm.get_mode()
         }
 
+    def get_memory_flags(self) -> Dict[str, bool]:
+        """Текущее состояние всех уровней памяти (stm/ltm/profile/rag)"""
+        return memory_flags.get_flags()
+
+    def set_memory_flag(self, level: str, enabled: bool) -> Dict[str, bool]:
+        """Включает/выключает уровень памяти из веб-панели, сохраняет на диск
+        и при необходимости лениво поднимает тяжёлые ресурсы (Qdrant/RAG),
+        если они не были загружены при старте (например, из-за fast_mode)"""
+        flags = memory_flags.set_flag(level, enabled)
+        if enabled and level == "ltm" and self.memory:
+            self.memory.long_term.ensure_ready()
+        if enabled and level == "rag":
+            self.llm.ensure_rag_loaded()
+        return flags
+
+    def get_model_config(self) -> Dict:
+        """Текущий выбор моделей + куратированные списки для выпадающих
+        списков в /panel (зависят от текущего режима local/cloud)"""
+        return {
+            "llm": {
+                "mode": self.llm.get_mode(),
+                "current": self.llm.get_current_model_id(),
+                "local_models": LLM_LOCAL_MODELS,
+                "cloud_models": LLM_CLOUD_MODELS,
+            },
+            "stt": {
+                "current": self.stt.get_current_model_id(),
+                "models": WHISPER_MODELS,
+            },
+            "tts": {
+                "mode": self.tts.get_mode(),
+                "current": self.tts.get_current_speaker(),
+                "speakers": self.tts.get_available_speakers(),
+            },
+        }
+
+    def set_llm_model(self, model_id: str) -> bool:
+        return self.llm.set_model(model_id)
+
+    def set_stt_model(self, model_id: str):
+        self.stt.set_model(model_id)
+
+    def set_tts_speaker(self, speaker: str):
+        self.tts.set_speaker(speaker)
+
     async def process_audio_chunk(self, pcm_bytes: bytes) -> Optional[dict]:
         status, audio = self.audio_buffer.process_chunk(pcm_bytes)
 
@@ -286,32 +335,33 @@ class RobotBrain:
         }
 
     def _build_memory_context(self, user_text: str) -> str:
-        """Собирает контекст для LLM из памяти"""
-        # Краткосрочная память — последние реплики текущей сессии (RAM, не хранилище)
-        stm = self.memory.short_term.get_context()
+        """Собирает контекст для LLM из памяти — каждый уровень (stm/ltm/profile)
+        независимо включается/выключается через memory_flags (панель /panel),
+        вместо единого FAST_MODE как раньше"""
+        flags = memory_flags.get_flags()
 
-        if FAST_MODE:
-            # Ничего лишнего: ни RAG-воспоминаний, ни эмоционального профиля,
-            # ни приветствий по времени — только сама история текущего диалога.
-            return f"Последние реплики:\n{stm}" if stm else ""
+        # Краткосрочная память — последние реплики текущей сессии (RAM, не хранилище)
+        stm = self.memory.short_term.get_context() if flags.get("stm", True) else ""
 
         parts = []
         if stm:
             parts.append(f"Последние реплики:\n{stm}")
 
-        # Долгосрочная память — релевантные воспоминания
-        ltm = self.memory.get_relevant_memories(user_text)
-        if ltm:
-            parts.append(f"Релевантные воспоминания:\n{ltm}")
+        # Долгосрочная память — релевантные воспоминания (Qdrant)
+        if flags.get("ltm", True):
+            ltm = self.memory.get_relevant_memories(user_text)
+            if ltm:
+                parts.append(f"Релевантные воспоминания:\n{ltm}")
 
         # Эмоциональный профиль
-        dom = max(self.memory.profile.dominant_emotions, key=self.memory.profile.dominant_emotions.get)
-        parts.append(f"Доминантная эмоция пользователя: {dom}")
+        if flags.get("profile", True):
+            dom = max(self.memory.profile.dominant_emotions, key=self.memory.profile.dominant_emotions.get)
+            parts.append(f"Доминантная эмоция пользователя: {dom}")
 
-        # Приветствие по времени
-        greeting = self.memory.get_day_greeting()
-        if greeting and not stm:
-            parts.append(f"Приветствие: {greeting}")
+            # Приветствие по времени
+            greeting = self.memory.get_day_greeting()
+            if greeting and not stm:
+                parts.append(f"Приветствие: {greeting}")
 
         return "\n\n".join(parts)
 
@@ -521,7 +571,9 @@ class RobotBrain:
                 "current_emotion": self.current_emotion,
                 "modes": self.get_modes(),
                 "memory": self.memory.short_term.get_summary() if self.memory else {},
-                "ltm_enabled": self.memory.long_term.enabled if self.memory else False
+                "ltm_enabled": self.memory.long_term.enabled if self.memory else False,
+                "memory_flags": self.get_memory_flags(),
+                "model_config": self.get_model_config()
             }
 
         elif cmd_type == "clear_history":
@@ -541,6 +593,41 @@ class RobotBrain:
             elif module == "llm":
                 self.set_llm_mode(mode)
             return {"status": "ok", "module": module, "mode": mode, "modes": self.get_modes()}
+
+        elif cmd_type == "get_memory_config":
+            return {"status": "ok", "memory_flags": self.get_memory_flags()}
+
+        elif cmd_type == "set_memory_config":
+            level = command.get("level")
+            enabled = command.get("enabled")
+            if level not in ("stm", "ltm", "profile", "rag"):
+                return {"status": "error", "message": f"Неизвестный уровень памяти: {level}"}
+            flags = self.set_memory_flag(level, bool(enabled))
+            return {"status": "ok", "level": level, "enabled": bool(enabled), "memory_flags": flags}
+
+        elif cmd_type == "get_model_config":
+            return {"status": "ok", "model_config": self.get_model_config()}
+
+        elif cmd_type == "set_llm_model":
+            model_id = command.get("model_id")
+            ok = self.set_llm_model(model_id)
+            if not ok:
+                return {"status": "error", "message": f"Неизвестная модель LLM: {model_id}"}
+            return {"status": "ok", "model_config": self.get_model_config()}
+
+        elif cmd_type == "set_stt_model":
+            model_id = command.get("model_id")
+            if not model_id:
+                return {"status": "error", "message": "Не указан model_id"}
+            self.set_stt_model(model_id)
+            return {"status": "ok", "model_config": self.get_model_config()}
+
+        elif cmd_type == "set_tts_speaker":
+            speaker = command.get("speaker")
+            if not speaker:
+                return {"status": "error", "message": "Не указан speaker"}
+            self.set_tts_speaker(speaker)
+            return {"status": "ok", "model_config": self.get_model_config()}
 
         else:
             return {"status": "error", "message": f"Неизвестная команда: {cmd_type}"}

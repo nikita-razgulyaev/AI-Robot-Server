@@ -25,6 +25,7 @@ from config.settings import (
     RAG_ENCODER_MODEL, FAST_MODE
 )
 from modules.qdrant_singleton import get_qdrant_client, encode_text
+from modules import memory_flags
 
 logger = logging.getLogger(__name__)
 
@@ -167,19 +168,30 @@ class LongTermMemory:
     """Долгосрочная память через Qdrant с векторными эмбеддингами"""
 
     def __init__(self):
-        self.enabled = LONG_TERM_MEMORY_ENABLED
+        # self.enabled — "поднят ли клиент Qdrant" (возможность), а не "включён ли
+        # уровень памяти прямо сейчас" (это memory_flags.get_flags()["ltm"],
+        # проверяется отдельно в каждом save_*/search_*). Поднимаем клиент сразу,
+        # только если LTM включена по дефолту (config.yaml/FAST_MODE) — иначе
+        # лениво поднимем через ensure_ready() при первом включении из панели.
+        self.enabled = False
         self.client = None
-        self._init_qdrant()
+        if memory_flags.get_flags().get("ltm", LONG_TERM_MEMORY_ENABLED):
+            self._init_qdrant()
+
+    def ensure_ready(self):
+        """Ленивая инициализация клиента Qdrant — вызывается при включении LTM
+        из веб-панели, если клиент ещё не был поднят при старте (например, был
+        выключен по умолчанию через FAST_MODE)"""
+        if self.client is None:
+            self._init_qdrant()
 
     def _init_qdrant(self):
-        if not self.enabled:
-            logger.info("Долгосрочная память отключена (long_term_enabled=false)")
-            return
         try:
             from qdrant_client.models import Distance, VectorParams
 
             # Используем общий синглтон
             self.client = get_qdrant_client()
+            self.enabled = True
             logger.info(f"✅ Qdrant LTM подключён (shared client)")
             self._ensure_collections()
         except ImportError as e:
@@ -211,7 +223,7 @@ class LongTermMemory:
 
     def save_dialogue_turn(self, turn: DialogueTurn, user_id: str = "default"):
         """Сохраняет реплику с эмбеддингом"""
-        if not self.enabled or not self.client:
+        if not memory_flags.get_flags().get("ltm", True) or not self.enabled or not self.client:
             return
         try:
             from qdrant_client.models import PointStruct
@@ -233,7 +245,7 @@ class LongTermMemory:
 
     def save_emotional_moment(self, moment: EmotionalMoment, user_id: str = "default"):
         """Сохраняет эмоциональный момент с эмбеддингом"""
-        if not self.enabled or not self.client:
+        if not memory_flags.get_flags().get("ltm", True) or not self.enabled or not self.client:
             return
         try:
             from qdrant_client.models import PointStruct
@@ -255,7 +267,7 @@ class LongTermMemory:
 
     def save_fact(self, fact: UserFact, user_id: str = "default"):
         """Сохраняет факт с эмбеддингом"""
-        if not self.enabled or not self.client:
+        if not memory_flags.get_flags().get("ltm", True) or not self.enabled or not self.client:
             return
         try:
             from qdrant_client.models import PointStruct
@@ -277,7 +289,7 @@ class LongTermMemory:
 
     def search_relevant(self, query: str, collection: str, user_id: str = "default", limit: int = 3) -> List[Dict]:
         """Векторный поиск релевантных воспоминаний"""
-        if not self.enabled or not self.client:
+        if not memory_flags.get_flags().get("ltm", True) or not self.enabled or not self.client:
             return []
         try:
             query_vector = encode_text(query)
@@ -334,8 +346,9 @@ class MemoryManager:
         self.profile = self._load_profile()
 
     def _load_profile(self) -> EmotionalProfile:
-        # fast_mode: не читаем ничего с диска — просто пустой профиль в RAM.
-        if FAST_MODE:
+        # Если уровень "профиль" выключен (по умолчанию из-за fast_mode или
+        # вручную из панели) — не читаем ничего с диска, пустой профиль в RAM.
+        if not memory_flags.get_flags().get("profile", not FAST_MODE):
             return EmotionalProfile(user_id=self.user_id)
         profile_path = MEMORY_DIR / f"user_{self.user_id}_profile.json"
         if profile_path.exists():
@@ -348,8 +361,8 @@ class MemoryManager:
         return EmotionalProfile(user_id=self.user_id)
 
     def save_profile(self):
-        # fast_mode: не пишем ничего на диск — ноль I/O на каждую реплику.
-        if FAST_MODE:
+        # Уровень "профиль" выключен — не пишем ничего на диск.
+        if not memory_flags.get_flags().get("profile", not FAST_MODE):
             return
         profile_path = MEMORY_DIR / f"user_{self.user_id}_profile.json"
         try:
@@ -359,47 +372,59 @@ class MemoryManager:
             logger.error(f"Ошибка сохранения профиля: {e}")
 
     def record_interaction(self, user_text: str, soren_text: str, emotion: str):
-        """Записывает взаимодействие в обе системы памяти"""
-        # Краткосрочная — держим всегда (RAM only, нужна для связности диалога
-        # в пределах текущей сессии, никакой записи на диск/в БД тут нет).
-        self.short_term.add_turn("user", user_text)
-        self.short_term.add_turn("assistant", soren_text, emotion)
+        """Записывает взаимодействие в системы памяти — каждый уровень (stm/ltm/profile)
+        независимо проверяется через memory_flags, вместо единого FAST_MODE как раньше"""
+        flags = memory_flags.get_flags()
 
-        if FAST_MODE:
-            # Никакого профиля, привычек, фактов, Qdrant — максимальная скорость.
+        # Краткосрочная — RAM only, нужна для связности диалога в пределах текущей
+        # сессии, никакой записи на диск/в БД. Единственный уровень, включённый
+        # по умолчанию даже в fast_mode — но теперь тоже переключаем через панель.
+        if flags.get("stm", True):
+            self.short_term.add_turn("user", user_text)
+            self.short_term.add_turn("assistant", soren_text, emotion)
+
+        ltm_on = flags.get("ltm", True)
+        profile_on = flags.get("profile", True)
+
+        if not ltm_on and not profile_on:
+            # Ни долгосрочной памяти, ни профиля — максимальная скорость
+            # (эквивалент старого FAST_MODE, но настраивается отдельно для каждого).
             return
 
         now = datetime.now().isoformat()
 
-        # Обновляем профиль
-        self.profile.last_seen = now
-        self._update_emotions(emotion)
-        self._update_habits(user_text, soren_text)
+        if profile_on:
+            self.profile.last_seen = now
+            self._update_emotions(emotion)
+            self._update_habits(user_text, soren_text)
 
-        # Долгосрочная — диалог
-        user_turn = DialogueTurn(timestamp=now, role="user", text=user_text)
-        soren_turn = DialogueTurn(timestamp=now, role="assistant", text=soren_text, emotion=emotion)
-        self.long_term.save_dialogue_turn(user_turn, self.user_id)
-        self.long_term.save_dialogue_turn(soren_turn, self.user_id)
+        if ltm_on:
+            # Долгосрочная — диалог
+            user_turn = DialogueTurn(timestamp=now, role="user", text=user_text)
+            soren_turn = DialogueTurn(timestamp=now, role="assistant", text=soren_text, emotion=emotion)
+            self.long_term.save_dialogue_turn(user_turn, self.user_id)
+            self.long_term.save_dialogue_turn(soren_turn, self.user_id)
 
-        # Долгосрочная — эмоциональный момент
-        if soren_turn.is_deep:
-            moment = EmotionalMoment(
-                timestamp=now,
-                user_emotion="unknown",
-                soren_emotion=emotion,
-                trigger=user_text[:100],
-                impact=0.7 if emotion in ["sad", "loving", "angry"] else 0.5,
-                text=soren_text[:200],
-                category=self._categorize_moment(emotion, user_text)
-            )
-            self.long_term.save_emotional_moment(moment, self.user_id)
-            self.profile.key_moments.append(asdict(moment))
+            # Долгосрочная — эмоциональный момент
+            if soren_turn.is_deep:
+                moment = EmotionalMoment(
+                    timestamp=now,
+                    user_emotion="unknown",
+                    soren_emotion=emotion,
+                    trigger=user_text[:100],
+                    impact=0.7 if emotion in ["sad", "loving", "angry"] else 0.5,
+                    text=soren_text[:200],
+                    category=self._categorize_moment(emotion, user_text)
+                )
+                self.long_term.save_emotional_moment(moment, self.user_id)
+                if profile_on:
+                    self.profile.key_moments.append(asdict(moment))
 
-        # Долгосрочная — факты
-        self._extract_facts(user_text, now)
+            # Долгосрочная — факты
+            self._extract_facts(user_text, now)
 
-        self.save_profile()
+        if profile_on:
+            self.save_profile()
 
     def _update_emotions(self, emotion: str):
         alpha = 0.3
@@ -506,11 +531,14 @@ class MemoryManager:
             return "Снова здесь. Хорошо."
 
     def get_context_for_llm(self) -> str:
-        """Формирует контекст для LLM из памяти"""
-        # Краткосрочная память
-        stm = self.short_term.get_context()
+        """Формирует контекст для LLM из памяти (fallback-путь для прямых вызовов
+        LLMEngine без предварительно собранного memory_context — см. LLMEngine.generate).
+        Основной путь для робота — RobotBrain._build_memory_context, использующий те же флаги."""
+        flags = memory_flags.get_flags()
 
-        if FAST_MODE:
+        stm = self.short_term.get_context() if flags.get("stm", True) else ""
+
+        if not flags.get("profile", not FAST_MODE):
             # Только последние реплики текущего диалога — без профиля,
             # доминантных эмоций и привычек (это лишние токены в промпте).
             return f"Последние реплики:\n{stm}" if stm else ""
@@ -537,7 +565,7 @@ class MemoryManager:
 
     def get_relevant_memories(self, query: str) -> str:
         """Получает релевантные воспоминания из долгосрочной памяти"""
-        if not self.long_term.enabled:
+        if not memory_flags.get_flags().get("ltm", True) or not self.long_term.enabled:
             return ""
 
         memories = []

@@ -7,9 +7,11 @@ from typing import List, Dict, Optional
 from config.settings import (
     LLM_MODE, LLM_MODEL_PATH, LLM_N_CTX, LLM_N_THREADS, LLM_TEMPERATURE, LLM_REPEAT_PENALTY,
     CHARACTER_DIR, RAG_TOP_K, CLOUD_API_KEY, CLOUD_MODEL_NAME,
+    LLM_LOCAL_MODELS, LLM_CLOUD_MODELS,
     LORA_ENABLED, LORA_PATH, LORA_SCALE, FAST_MODE
 )
 from modules.qdrant_singleton import get_qdrant_client, get_encoder, encode_text
+from modules import memory_flags
 
 logger = logging.getLogger(__name__)
 
@@ -147,9 +149,9 @@ class CloudLLMEngine:
     """Облачный LLM через Hugging Face Inference Providers — роутер сам выбирает
     самого быстрого провайдера (Cerebras/Groq/и др.) под нужную модель"""
 
-    def __init__(self, memory_manager=None):
+    def __init__(self, memory_manager=None, model_name: str = None):
         self.api_key = CLOUD_API_KEY
-        self.model = CLOUD_MODEL_NAME
+        self.model = model_name or CLOUD_MODEL_NAME
         self.base_url = "https://router.huggingface.co/v1/chat/completions"
         self.conversation_history = []
         self.system_prompt = ""
@@ -181,13 +183,20 @@ class CloudLLMEngine:
             self.system_prompt = "Ты — Сорен, амбарная сова, Главный Страж. Отвечай мудро и сдержанно."
 
     def _load_rag(self):
-        # fast_mode: RAG полностью выключен — не грузим ни Qdrant, ни
-        # sentence-transformers энкодер (самая тяжёлая часть инициализации),
-        # ни файл канона. self.vector_rag/keyword_rag остаются None,
-        # _build_messages/_build_prompt ниже просто не делают поиск.
-        if FAST_MODE:
+        # Грузим тяжёлые ресурсы (Qdrant, sentence-transformers энкодер, файл
+        # канона) только если уровень "rag" включён по умолчанию (обычно = not
+        # fast_mode). Если выключен, self.vector_rag/keyword_rag остаются None —
+        # _ensure_rag_loaded() поднимет их лениво, если уровень включат из
+        # панели уже во время работы сервера.
+        if memory_flags.get_flags().get("rag", not FAST_MODE):
+            self._ensure_rag_loaded()
+        else:
             self.vector_rag = None
             self.keyword_rag = None
+
+    def _ensure_rag_loaded(self):
+        """Ленивая инициализация RAG-ресурсов при включении уровня 'rag' из панели"""
+        if self.vector_rag is not None or self.keyword_rag is not None:
             return
         self.vector_rag = VectorRAG()
         rag_path = CHARACTER_DIR / "Soren_rag_chunks.json"
@@ -237,9 +246,11 @@ class CloudLLMEngine:
         return "calm"
 
     def _build_messages(self, user_message: str, vision_context: str = "", memory_context: str = "") -> List[Dict]:
-        rag_chunks = self.vector_rag.search(user_message, top_k=RAG_TOP_K) if self.vector_rag else []
-        if not rag_chunks and self.keyword_rag:
-            rag_chunks = self.keyword_rag.search(user_message, top_k=RAG_TOP_K)
+        rag_chunks = []
+        if memory_flags.get_flags().get("rag", True):
+            rag_chunks = self.vector_rag.search(user_message, top_k=RAG_TOP_K) if self.vector_rag else []
+            if not rag_chunks and self.keyword_rag:
+                rag_chunks = self.keyword_rag.search(user_message, top_k=RAG_TOP_K)
 
         rag_text = "\n".join(rag_chunks) if rag_chunks else ""
 
@@ -347,8 +358,9 @@ class CloudLLMEngine:
 class LocalLLMEngine:
     """Локальный LLM через llama.cpp с поддержкой LoRA"""
 
-    def __init__(self, memory_manager=None):
+    def __init__(self, memory_manager=None, model_path: Path = None):
         self.model = None
+        self.model_path = Path(model_path) if model_path else LLM_MODEL_PATH
         self.conversation_history = []
         self.system_prompt = ""
         self.vector_rag = None
@@ -374,13 +386,20 @@ class LocalLLMEngine:
             self.system_prompt = "Ты — Сорен, амбарная сова, Главный Страж. Отвечай мудро и сдержанно."
 
     def _load_rag(self):
-        # fast_mode: RAG полностью выключен — не грузим ни Qdrant, ни
-        # sentence-transformers энкодер (самая тяжёлая часть инициализации),
-        # ни файл канона. self.vector_rag/keyword_rag остаются None,
-        # _build_messages/_build_prompt ниже просто не делают поиск.
-        if FAST_MODE:
+        # Грузим тяжёлые ресурсы (Qdrant, sentence-transformers энкодер, файл
+        # канона) только если уровень "rag" включён по умолчанию (обычно = not
+        # fast_mode). Если выключен, self.vector_rag/keyword_rag остаются None —
+        # _ensure_rag_loaded() поднимет их лениво, если уровень включат из
+        # панели уже во время работы сервера.
+        if memory_flags.get_flags().get("rag", not FAST_MODE):
+            self._ensure_rag_loaded()
+        else:
             self.vector_rag = None
             self.keyword_rag = None
+
+    def _ensure_rag_loaded(self):
+        """Ленивая инициализация RAG-ресурсов при включении уровня 'rag' из панели"""
+        if self.vector_rag is not None or self.keyword_rag is not None:
             return
         self.vector_rag = VectorRAG()
         rag_path = CHARACTER_DIR / "Soren_rag_chunks.json"
@@ -401,7 +420,7 @@ class LocalLLMEngine:
                 logger.error(f"Ошибка загрузки эмоций: {e}")
 
     def _load_model(self):
-        if LLM_MODEL_PATH is None:
+        if self.model_path is None:
             logger.error(
                 "LLM_MODEL_PATH не задан (llm.local_model_path отсутствует в config.yaml) — "
                 "локальная модель не может быть загружена."
@@ -409,15 +428,15 @@ class LocalLLMEngine:
             self.model = None
             return
 
-        logger.info(f"Загрузка LLM: {LLM_MODEL_PATH}")
-        if not LLM_MODEL_PATH.exists():
-            logger.error(f"Модель LLM не найдена: {LLM_MODEL_PATH}")
+        logger.info(f"Загрузка LLM: {self.model_path}")
+        if not self.model_path.exists():
+            logger.error(f"Модель LLM не найдена: {self.model_path}")
             return
         try:
             from llama_cpp import Llama
 
             kwargs = {
-                "model_path": str(LLM_MODEL_PATH),
+                "model_path": str(self.model_path),
                 "n_ctx": LLM_N_CTX,
                 "n_threads": LLM_N_THREADS,
                 "verbose": False
@@ -466,9 +485,11 @@ class LocalLLMEngine:
         return "calm"
 
     def _build_prompt(self, user_message: str, vision_context: str = "", memory_context: str = "") -> List[Dict]:
-        rag_chunks = self.vector_rag.search(user_message, top_k=RAG_TOP_K) if self.vector_rag else []
-        if not rag_chunks and self.keyword_rag:
-            rag_chunks = self.keyword_rag.search(user_message, top_k=RAG_TOP_K)
+        rag_chunks = []
+        if memory_flags.get_flags().get("rag", True):
+            rag_chunks = self.vector_rag.search(user_message, top_k=RAG_TOP_K) if self.vector_rag else []
+            if not rag_chunks and self.keyword_rag:
+                rag_chunks = self.keyword_rag.search(user_message, top_k=RAG_TOP_K)
 
         rag_text = "\n".join(rag_chunks) if rag_chunks else ""
 
@@ -551,6 +572,13 @@ class LLMEngine:
         self.local_engine = None
         self.cloud_engine = None
         self.memory = memory_manager
+        # Текущая выбранная модель (id из config.yaml llm.local_models/cloud_models).
+        # Если текущий путь/имя модели не совпадает ни с одним элементом
+        # куратированного списка (например, задан вручную в config.yaml),
+        # используем сам путь/имя как id — панель тогда просто не подсветит
+        # ни один пункт списка активным, но всё продолжит работать.
+        self.local_model_id = self._find_local_model_id(str(LLM_MODEL_PATH) if LLM_MODEL_PATH else None)
+        self.cloud_model_id = self._find_cloud_model_id(CLOUD_MODEL_NAME)
 
         if self.mode == "cloud":
             self.cloud_engine = CloudLLMEngine(memory_manager)
@@ -558,6 +586,24 @@ class LLMEngine:
         else:
             self.local_engine = LocalLLMEngine(memory_manager)
             logger.info("💻 LLM режим: ЛОКАЛЬНЫЙ (llama.cpp + LoRA)")
+
+    @staticmethod
+    def _find_local_model_id(path_str: Optional[str]) -> Optional[str]:
+        if not path_str:
+            return None
+        for entry in LLM_LOCAL_MODELS:
+            if entry.get("path") and Path(entry["path"]).name == Path(path_str).name:
+                return entry.get("id")
+        return path_str
+
+    @staticmethod
+    def _find_cloud_model_id(model_name: Optional[str]) -> Optional[str]:
+        if not model_name:
+            return None
+        for entry in LLM_CLOUD_MODELS:
+            if entry.get("model") == model_name:
+                return entry.get("id")
+        return model_name
 
     def set_mode(self, mode: str):
         if mode not in ["local", "cloud"]:
@@ -578,6 +624,43 @@ class LLMEngine:
 
     def get_mode(self) -> str:
         return self.mode
+
+    def get_current_model_id(self) -> Optional[str]:
+        return self.local_model_id if self.mode == "local" else self.cloud_model_id
+
+    def set_model(self, model_id: str) -> bool:
+        """Переключает конкретную модель по id из config.yaml (llm.local_models
+        или llm.cloud_models) и сразу перезагружает соответствующий движок —
+        без рестарта сервера. Список, в котором нашёлся id, определяет и режим
+        (local/cloud), поэтому переключение модели может заодно переключить режим."""
+        for entry in LLM_LOCAL_MODELS:
+            if entry.get("id") == model_id:
+                logger.info(f"💻 Загружаю локальную модель '{model_id}' ({entry.get('path')})…")
+                self.local_engine = LocalLLMEngine(self.memory, model_path=entry.get("path"))
+                self.cloud_engine = None
+                self.mode = "local"
+                self.local_model_id = model_id
+                return True
+
+        for entry in LLM_CLOUD_MODELS:
+            if entry.get("id") == model_id:
+                logger.info(f"☁️ Переключаюсь на облачную модель '{model_id}' ({entry.get('model')})…")
+                self.cloud_engine = CloudLLMEngine(self.memory, model_name=entry.get("model"))
+                self.local_engine = None
+                self.mode = "cloud"
+                self.cloud_model_id = model_id
+                return True
+
+        logger.warning(f"Неизвестный id модели LLM: {model_id}")
+        return False
+
+    def ensure_rag_loaded(self):
+        """Лениво поднимает RAG-ресурсы (Qdrant + энкодер + канон) активного
+        движка — вызывается при включении уровня 'rag' из веб-панели, если
+        сервер стартовал с выключенным RAG (fast_mode или ручной выбор)"""
+        engine = self.cloud_engine if self.mode == "cloud" else self.local_engine
+        if engine is not None:
+            engine._ensure_rag_loaded()
 
     def generate(self, user_message: str, vision_context: str = "", memory_context: Optional[str] = None) -> dict:
         # Если вызывающий код (RobotBrain._build_memory_context) уже собрал контекст

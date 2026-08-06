@@ -222,6 +222,10 @@ class TTSEngine:
         self.mode = TTS_MODE
         self.local_engine = None
         self.cloud_engine = None
+        # Текущий выбранный голос отдельно для каждого режима — переключение
+        # local/cloud не сбрасывает выбор голоса внутри другого режима.
+        self.local_speaker = SILERO_SPEAKER
+        self.cloud_speaker = FREETTS_VOICE
 
         if self.mode == "cloud":
             self.cloud_engine = FreeTTSEngine()
@@ -240,16 +244,34 @@ class TTSEngine:
         if mode == "cloud":
             if self.cloud_engine is None:
                 self.cloud_engine = FreeTTSEngine()
+                self.cloud_engine.voice = self.cloud_speaker
             self.local_engine = None
             logger.info("☁️ TTS переключён на ОБЛАЧНЫЙ (FreeTTS)")
         else:
             if self.local_engine is None:
                 self.local_engine = LocalTTSEngine()
+                self.local_engine.default_speaker = self.local_speaker
             self.cloud_engine = None
             logger.info("💻 TTS переключён на ЛОКАЛЬНЫЙ")
 
     def get_mode(self) -> str:
         return self.mode
+
+    def get_current_speaker(self) -> str:
+        return self.cloud_speaker if self.mode == "cloud" else self.local_speaker
+
+    def set_speaker(self, speaker: str):
+        """Меняет голос для текущего режима — применяется сразу, без пересоздания движка"""
+        if self.mode == "cloud":
+            self.cloud_speaker = speaker
+            if self.cloud_engine:
+                self.cloud_engine.voice = speaker
+            logger.info(f"☁️ Голос TTS (облако) → {speaker}")
+        else:
+            self.local_speaker = speaker
+            if self.local_engine:
+                self.local_engine.default_speaker = speaker
+            logger.info(f"💻 Голос TTS (локально) → {speaker}")
 
     def _get_local_fallback(self) -> "LocalTTSEngine":
         """Ленивая инициализация локального Silero — грузится только когда реально
@@ -258,6 +280,7 @@ class TTSEngine:
         if self.local_engine is None:
             logger.info("💻 Инициализирую локальный Silero как запасной TTS...")
             self.local_engine = LocalTTSEngine()
+            self.local_engine.default_speaker = self.local_speaker
         return self.local_engine
 
     def synthesize(self, text: str, speaker: str = None) -> bytes:

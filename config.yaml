@@ -53,6 +53,17 @@ stt:
     whisper_model: "small"
     device: "cpu"
     compute_type: "int8"
+    # Куратированный список размеров Whisper для выпадающего списка в /panel.
+    # Выбор применяется сразу (faster-whisper перезагружается с новым размером).
+    whisper_models:
+        - id: "tiny"
+          label: "Tiny — максимальная скорость"
+        - id: "base"
+          label: "Base"
+        - id: "small"
+          label: "Small — баланс скорости и точности"
+        - id: "medium"
+          label: "Medium — точнее, медленнее"
 
 # === TTS ===
 tts:
@@ -77,6 +88,23 @@ llm:
     # без скрытой цепочки рассуждений. :fastest уводит на Cerebras/Groq (сотни-тысячи ток/сек).
     cloud_model: "meta-llama/Llama-3.3-70B-Instruct:fastest"
     cloud_api_key: "" # Берётся из .env HF_TOKEN (huggingface.co/settings/tokens, право "Make calls to Inference Providers")
+    # Куратированные списки моделей для выпадающего списка в /panel (AI Core).
+    # Выбор в панели применяется сразу — движок перезагружается с новой моделью
+    # без рестарта сервера. "id" — то, что летит в POST /llm_model.
+    local_models:
+        - id: "qwen2.5-7b-q4"
+          label: "Qwen2.5 7B Instruct (Q4_K_M)"
+          path: "models/qwen2.5-7b-instruct-Q4_K_M.gguf"
+    cloud_models:
+        - id: "llama-3.3-70b-fastest"
+          label: "Llama 3.3 70B Instruct (fastest)"
+          model: "meta-llama/Llama-3.3-70B-Instruct:fastest"
+        - id: "gpt-oss-120b-fastest"
+          label: "GPT-OSS 120B (fastest)"
+          model: "openai/gpt-oss-120b:fastest"
+        - id: "qwen2.5-72b-fastest"
+          label: "Qwen2.5 72B Instruct (fastest)"
+          model: "Qwen/Qwen2.5-72B-Instruct:fastest"
 
 # === Vision ===
 vision:

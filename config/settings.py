@@ -71,6 +71,7 @@ STT_MODE = _config.get("stt", {}).get("mode", "local")
 WHISPER_MODEL_SIZE = _config.get("stt", {}).get("whisper_model", "small")
 WHISPER_DEVICE = _config.get("stt", {}).get("device", "cpu")
 WHISPER_COMPUTE_TYPE = _config.get("stt", {}).get("compute_type", "int8")
+WHISPER_MODELS = _config.get("stt", {}).get("whisper_models", [])
 
 # ========== TTS ==========
 TTS_MODE = _config.get("tts", {}).get("mode", "local")
@@ -112,6 +113,12 @@ if LLM_MODE == "cloud" and not CLOUD_MODEL_NAME:
         "Укажи имя облачной модели (например: openai/gpt-oss-120b:fastest)."
     )
 CLOUD_MODEL_NAME = CLOUD_MODEL_NAME or ""
+
+# Куратированные списки моделей для выпадающего списка в /panel (см. config.yaml
+# llm.local_models / llm.cloud_models). Каждый элемент — dict с "id"/"label" и
+# "path" (для local) или "model" (для cloud).
+LLM_LOCAL_MODELS = _config.get("llm", {}).get("local_models", [])
+LLM_CLOUD_MODELS = _config.get("llm", {}).get("cloud_models", [])
 
 # Vision
 YOLO_MODEL = MODELS_DIR / "yolov8n.pt"

@@ -90,6 +90,8 @@ async def status():
         "audio_input_mode": audio_input_mode,
         "audio_output_mode": audio_output_mode,
         "ai_modes": robot_brain.get_modes(),
+        "memory_flags": robot_brain.get_memory_flags(),
+        "model_config": robot_brain.get_model_config(),
         "connections": len(active_connections),
         "panel_connections": len(panel_connections),
         "device_connections": len(device_connections),
@@ -151,6 +153,65 @@ async def set_ai_mode(module: str = Form(...), mode: str = Form(...)):
 
     result = await robot_brain.handle_command({"type": "set_mode", "module": module, "mode": mode})
     logger.info(f"🧠 Режим {module.upper()} изменён: {mode}")
+
+    return JSONResponse(result)
+
+@app.post("/llm_model")
+async def set_llm_model(model_id: str = Form(...)):
+    """Переключение конкретной модели LLM (id из config.yaml llm.local_models/cloud_models).
+    Список, в котором найден id, сам определяет режим (local/cloud) — движок
+    перезагружается сразу, без рестарта сервера."""
+    if robot_brain is None:
+        return JSONResponse({"status": "error", "message": "Сервер ещё загружается"})
+
+    result = await robot_brain.handle_command({"type": "set_llm_model", "model_id": model_id})
+    logger.info(f"🧠 Модель LLM → {model_id}")
+
+    return JSONResponse(result)
+
+@app.post("/stt_model")
+async def set_stt_model(model_id: str = Form(...)):
+    """Переключение размера Whisper (id из config.yaml stt.whisper_models) — сразу, без рестарта"""
+    if robot_brain is None:
+        return JSONResponse({"status": "error", "message": "Сервер ещё загружается"})
+
+    result = await robot_brain.handle_command({"type": "set_stt_model", "model_id": model_id})
+    logger.info(f"🎤 Модель STT → {model_id}")
+
+    return JSONResponse(result)
+
+@app.post("/tts_speaker")
+async def set_tts_speaker(speaker: str = Form(...)):
+    """Переключение голоса TTS для текущего режима (local: Silero-спикер, cloud: edge-tts voice)"""
+    if robot_brain is None:
+        return JSONResponse({"status": "error", "message": "Сервер ещё загружается"})
+
+    result = await robot_brain.handle_command({"type": "set_tts_speaker", "speaker": speaker})
+    logger.info(f"🔊 Голос TTS → {speaker}")
+
+    return JSONResponse(result)
+
+@app.post("/memory_config")
+async def set_memory_config(level: str = Form(...), enabled: str = Form(...)):
+    """
+    Включение/выключение уровня памяти LLM из веб-панели.
+    level: "stm", "ltm", "profile" или "rag"
+    enabled: "1"/"0" (или "true"/"false")
+    """
+    if level not in ("stm", "ltm", "profile", "rag"):
+        return JSONResponse(
+            {"status": "error", "message": "Invalid level. Use 'stm', 'ltm', 'profile' or 'rag'"},
+            status_code=400
+        )
+
+    if robot_brain is None:
+        return JSONResponse({"status": "error", "message": "Сервер ещё загружается"})
+
+    enabled_bool = enabled.lower() in ("1", "true", "yes", "on")
+    result = await robot_brain.handle_command({
+        "type": "set_memory_config", "level": level, "enabled": enabled_bool
+    })
+    logger.info(f"🧠 Уровень памяти '{level}' → {'включён' if enabled_bool else 'выключен'}")
 
     return JSONResponse(result)
 
@@ -852,6 +913,13 @@ PANEL_HTML = """
   .segmented button.active.local{ background:rgba(139,179,133,.18); color:var(--sage); font-weight:600; }
   .segmented button.active.cloud{ background:rgba(111,163,199,.18); color:var(--slate); font-weight:600; }
   .segmented button:hover:not(.active){ color:var(--text-dim); background:var(--raised); }
+  .model-select{
+    width:100%; margin-top:10px; border:1px solid var(--border); border-radius:8px;
+    background:var(--panel-solid); color:var(--text-dim); font-family:'IBM Plex Mono', monospace;
+    font-size:11px; padding:7px 8px; cursor:pointer; transition:border-color .15s;
+  }
+  .model-select:hover{ border-color:var(--border); color:var(--text); }
+  .model-select:focus{ outline:none; border-color:var(--sage); }
   .core-note{ font-size:10.5px; color:var(--text-faint); margin-top:16px; text-align:center; border-top:1px solid var(--border-soft); padding-top:12px; }
 
   /* ===== AUDIO ROUTING ===== */
@@ -1105,6 +1173,7 @@ PANEL_HTML = """
           <button id="stt-local-btn" onclick="setAIMode('stt','local')">Локально</button>
           <button id="stt-cloud-btn" onclick="setAIMode('stt','cloud')">Облако</button>
         </div>
+        <select class="model-select" id="stt-model-select" onchange="setSTTModel(this.value)"></select>
       </div>
       <div class="core-card">
         <div class="name">Языковая модель</div>
@@ -1113,6 +1182,7 @@ PANEL_HTML = """
           <button id="llm-local-btn" onclick="setAIMode('llm','local')">Локально</button>
           <button id="llm-cloud-btn" onclick="setAIMode('llm','cloud')">Облако</button>
         </div>
+        <select class="model-select" id="llm-model-select" onchange="setLLMModel(this.value)"></select>
       </div>
       <div class="core-card">
         <div class="name">Синтез речи</div>
@@ -1121,6 +1191,7 @@ PANEL_HTML = """
           <button id="tts-local-btn" onclick="setAIMode('tts','local')">Локально</button>
           <button id="tts-cloud-btn" onclick="setAIMode('tts','cloud')">Облако</button>
         </div>
+        <select class="model-select" id="tts-model-select" onchange="setTTSSpeaker(this.value)"></select>
       </div>
     </div>
     <div class="core-note">Для облачных режимов требуется ключ API в .env — см. README</div>
@@ -1150,6 +1221,49 @@ PANEL_HTML = """
         </label>
       </div>
     </div>
+  </div>
+
+  <!-- MEMORY LEVELS -->
+  <div class="section">
+    <div class="section-head">
+      <h2>Уровни памяти</h2>
+      <span class="tag">LLM</span>
+    </div>
+    <div class="audio-grid">
+      <div class="audio-row">
+        <span class="label">Краткосрочная (STM)</span>
+        <span class="audio-state" id="mem-stm-text">—</span>
+        <label class="switch">
+          <input type="checkbox" id="mem-stm-toggle" onchange="toggleMemoryLevel('stm')">
+          <span class="track"></span>
+        </label>
+      </div>
+      <div class="audio-row">
+        <span class="label">Долгосрочная (LTM, Qdrant)</span>
+        <span class="audio-state" id="mem-ltm-text">—</span>
+        <label class="switch">
+          <input type="checkbox" id="mem-ltm-toggle" onchange="toggleMemoryLevel('ltm')">
+          <span class="track"></span>
+        </label>
+      </div>
+      <div class="audio-row">
+        <span class="label">Эмоциональный профиль</span>
+        <span class="audio-state" id="mem-profile-text">—</span>
+        <label class="switch">
+          <input type="checkbox" id="mem-profile-toggle" onchange="toggleMemoryLevel('profile')">
+          <span class="track"></span>
+        </label>
+      </div>
+      <div class="audio-row">
+        <span class="label">RAG канона мира</span>
+        <span class="audio-state" id="mem-rag-text">—</span>
+        <label class="switch">
+          <input type="checkbox" id="mem-rag-toggle" onchange="toggleMemoryLevel('rag')">
+          <span class="track"></span>
+        </label>
+      </div>
+    </div>
+    <div class="core-note">Изменения применяются сразу и сохраняются на диск — переживают перезапуск сервера</div>
   </div>
 
   <!-- VOICE -->
@@ -1221,6 +1335,8 @@ PANEL_HTML = """
   let audioInputMode = 'robot';
   let audioOutputMode = 'robot';
   let aiModes = { stt: 'local', tts: 'local', llm: 'local' };
+  let memoryFlags = { stm: true, ltm: true, profile: true, rag: true };
+  let modelConfig = { llm: {mode:'local', current:null, local_models:[], cloud_models:[]}, stt: {current:null, models:[]}, tts: {mode:'local', current:null, speakers:[]} };
 
   ws.onopen = () => {
     document.getElementById('status-dot').classList.add('online');
@@ -1230,6 +1346,8 @@ PANEL_HTML = """
     ws.send(JSON.stringify({type:'audio_mode'}));
     ws.send(JSON.stringify({type:'ai_mode'}));
     ws.send(JSON.stringify({type:'video_pref', enabled: videoPrefEnabled}));
+    fetchMemoryConfig();
+    fetchModelConfig();
   };
   ws.onclose = () => {
     document.getElementById('status-dot').classList.remove('online');
@@ -1349,6 +1467,7 @@ PANEL_HTML = """
       if (data.status === 'ok') {
         if (data.modes) { aiModes = data.modes; updateAIModeUI(); }
         log(`${module.toUpperCase()} → ${mode} ✓`);
+        if (module === 'llm' || module === 'tts') { fetchModelConfig(); }
       } else {
         log('Ошибка: ' + (data.message || 'неизвестная'));
         if (data.modes) { aiModes = data.modes; updateAIModeUI(); }
@@ -1364,6 +1483,7 @@ PANEL_HTML = """
       if (localBtn) localBtn.className = mode === 'local' ? 'active local' : '';
       if (cloudBtn) cloudBtn.className = mode === 'cloud' ? 'active cloud' : '';
     });
+    updateModelSelectsUI();
   }
 
   async function toggleAudioInputMode() {
@@ -1391,6 +1511,137 @@ PANEL_HTML = """
     const otx = document.getElementById('audio-output-mode-text');
     ot.checked = (audioOutputMode === 'local');
     otx.textContent = audioOutputMode === 'local' ? 'Локально · наушники ПК' : 'Робот · ESP32';
+  }
+
+  async function fetchMemoryConfig() {
+    try {
+      const r = await fetch('/status');
+      const data = await r.json();
+      if (data.memory_flags) { memoryFlags = data.memory_flags; updateMemoryFlagsUI(); }
+    } catch(e) { log('Не удалось получить уровни памяти: ' + e.message); }
+  }
+
+  async function fetchModelConfig() {
+    try {
+      const r = await fetch('/status');
+      const data = await r.json();
+      if (data.model_config) { modelConfig = data.model_config; updateModelSelectsUI(); }
+    } catch(e) { log('Не удалось получить список моделей: ' + e.message); }
+  }
+
+  function _fillSelect(selectEl, options, currentId, placeholder) {
+    if (!selectEl) return;
+    selectEl.innerHTML = '';
+    if (!options || !options.length) {
+      const opt = document.createElement('option');
+      opt.value = ''; opt.textContent = placeholder || '— нет вариантов —';
+      selectEl.appendChild(opt);
+      selectEl.disabled = true;
+      return;
+    }
+    selectEl.disabled = false;
+    let matched = false;
+    options.forEach(o => {
+      const opt = document.createElement('option');
+      opt.value = o.id; opt.textContent = o.label || o.id;
+      if (o.id === currentId) { opt.selected = true; matched = true; }
+      selectEl.appendChild(opt);
+    });
+    if (!matched && currentId) {
+      const opt = document.createElement('option');
+      opt.value = currentId; opt.textContent = currentId + ' (вручную из config.yaml)';
+      opt.selected = true;
+      selectEl.insertBefore(opt, selectEl.firstChild);
+    }
+  }
+
+  function updateModelSelectsUI() {
+    const llmMode = (aiModes.llm || modelConfig.llm.mode || 'local');
+    const llmOptions = llmMode === 'cloud' ? modelConfig.llm.cloud_models : modelConfig.llm.local_models;
+    _fillSelect(document.getElementById('llm-model-select'), llmOptions, modelConfig.llm.current, 'Список моделей пуст — задайте llm.local_models/cloud_models в config.yaml');
+
+    _fillSelect(document.getElementById('stt-model-select'), modelConfig.stt.models, modelConfig.stt.current, 'Список пуст — задайте stt.whisper_models в config.yaml');
+
+    const ttsSpeakers = (modelConfig.tts.speakers || []).map(s => ({id: s, label: s}));
+    _fillSelect(document.getElementById('tts-model-select'), ttsSpeakers, modelConfig.tts.current, 'Нет доступных голосов');
+  }
+
+  async function setLLMModel(modelId) {
+    if (!modelId) return;
+    log(`Модель LLM → ${modelId}…`);
+    const fd = new FormData(); fd.append('model_id', modelId);
+    try {
+      const r = await fetch('/llm_model', {method:'POST', body:fd});
+      const data = await r.json();
+      if (data.status === 'ok') {
+        if (data.model_config) { modelConfig = data.model_config; }
+        aiModes.llm = modelConfig.llm.mode; updateAIModeUI(); updateModelSelectsUI();
+        log(`LLM модель → ${modelId} ✓ (режим: ${modelConfig.llm.mode})`);
+      } else {
+        log('Ошибка: ' + (data.message || 'неизвестная'));
+      }
+    } catch(e) { log('Сетевая ошибка: ' + e.message); }
+  }
+
+  async function setSTTModel(modelId) {
+    if (!modelId) return;
+    log(`Модель STT (Whisper) → ${modelId}…`);
+    const fd = new FormData(); fd.append('model_id', modelId);
+    try {
+      const r = await fetch('/stt_model', {method:'POST', body:fd});
+      const data = await r.json();
+      if (data.status === 'ok') {
+        if (data.model_config) { modelConfig = data.model_config; }
+        log(`STT модель → ${modelId} ✓`);
+      } else {
+        log('Ошибка: ' + (data.message || 'неизвестная'));
+      }
+    } catch(e) { log('Сетевая ошибка: ' + e.message); }
+  }
+
+  async function setTTSSpeaker(speaker) {
+    if (!speaker) return;
+    log(`Голос TTS → ${speaker}…`);
+    const fd = new FormData(); fd.append('speaker', speaker);
+    try {
+      const r = await fetch('/tts_speaker', {method:'POST', body:fd});
+      const data = await r.json();
+      if (data.status === 'ok') {
+        if (data.model_config) { modelConfig = data.model_config; }
+        log(`Голос TTS → ${speaker} ✓`);
+      } else {
+        log('Ошибка: ' + (data.message || 'неизвестная'));
+      }
+    } catch(e) { log('Сетевая ошибка: ' + e.message); }
+  }
+
+  async function toggleMemoryLevel(level) {
+    const t = document.getElementById('mem-' + level + '-toggle');
+    const enabled = t.checked;
+    log(`Уровень памяти '${level}' → ${enabled ? 'вкл' : 'выкл'}…`);
+    const fd = new FormData(); fd.append('level', level); fd.append('enabled', enabled ? '1' : '0');
+    try {
+      const r = await fetch('/memory_config', {method:'POST', body:fd});
+      const data = await r.json();
+      if (data.status === 'ok') {
+        if (data.memory_flags) { memoryFlags = data.memory_flags; }
+        log(`Память '${level}' → ${enabled ? 'вкл' : 'выкл'} ✓`);
+      } else {
+        log('Ошибка: ' + (data.message || 'неизвестная'));
+      }
+    } catch(e) { log('Сетевая ошибка: ' + e.message); }
+    updateMemoryFlagsUI();
+  }
+
+  function updateMemoryFlagsUI() {
+    const labels = { stm: 'реплики хранятся', ltm: 'записи идут в Qdrant', profile: 'профиль обновляется', rag: 'канон подключён' };
+    ['stm','ltm','profile','rag'].forEach(level => {
+      const box = document.getElementById('mem-' + level + '-toggle');
+      const txt = document.getElementById('mem-' + level + '-text');
+      const on = !!memoryFlags[level];
+      if (box) box.checked = on;
+      if (txt) txt.textContent = on ? ('Включено · ' + labels[level]) : 'Выключено';
+    });
   }
 
   let mediaRecorder=null, audioChunks=[], isRecording=false, audioContext=null, analyser=null, visCanvas=null, visCtx=null;
