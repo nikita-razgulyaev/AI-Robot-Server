@@ -92,6 +92,7 @@ async def status():
         "ai_modes": robot_brain.get_modes(),
         "memory_flags": robot_brain.get_memory_flags(),
         "model_config": robot_brain.get_model_config(),
+        "quick_answers": robot_brain.get_quick_answers_status(),
         "connections": len(active_connections),
         "panel_connections": len(panel_connections),
         "device_connections": len(device_connections),
@@ -215,6 +216,18 @@ async def set_memory_config(level: str = Form(...), enabled: str = Form(...)):
 
     return JSONResponse(result)
 
+@app.post("/quick_answers/reload")
+async def reload_quick_answers():
+    """Перечитывает character/quick_answers.json с диска — без рестарта сервера.
+    Используется после ручного редактирования словаря быстрых ответов."""
+    if robot_brain is None:
+        return JSONResponse({"status": "error", "message": "Сервер ещё загружается"})
+
+    result = await robot_brain.handle_command({"type": "reload_quick_answers"})
+    logger.info(f"⚡ Словарь быстрых ответов перезагружен: {result.get('quick_answers')}")
+
+    return JSONResponse(result)
+
 @app.post("/speak")
 async def speak_text(text: str = Form(...)):
     logger.info(f"/speak вызван: '{text}'")
@@ -238,7 +251,7 @@ async def speak_text(text: str = Form(...)):
 
         robot_brain.mark_dialog_active()
 
-        llm_result = robot_brain.llm.generate(user_text, robot_brain.vision_context)
+        llm_result = robot_brain.generate_reply(user_text)
         response_text = llm_result.get("text", "")
         action = llm_result.get("action")
         emotion = llm_result.get("emotion", "calm")
@@ -332,7 +345,7 @@ async def voice_input(
 
         robot_brain.mark_dialog_active()
 
-        llm_result = robot_brain.llm.generate(user_text, robot_brain.vision_context)
+        llm_result = robot_brain.generate_reply(user_text)
         response_text = llm_result.get("text", "")
         action = llm_result.get("action")
         emotion = llm_result.get("emotion", "calm")
@@ -1266,6 +1279,22 @@ PANEL_HTML = """
     <div class="core-note">Изменения применяются сразу и сохраняются на диск — переживают перезапуск сервера</div>
   </div>
 
+  <!-- QUICK ANSWERS -->
+  <div class="section">
+    <div class="section-head">
+      <h2>Быстрые ответы</h2>
+      <span class="tag">без LLM</span>
+    </div>
+    <div class="audio-grid">
+      <div class="audio-row" style="grid-column:1/-1">
+        <span class="label">Словарь (character/quick_answers.json)</span>
+        <span class="audio-state" id="qa-count-text">—</span>
+        <button class="btn" onclick="reloadQuickAnswers()">Обновить</button>
+      </div>
+    </div>
+    <div class="core-note">Правки в JSON применяются сразу после нажатия «Обновить» — без рестарта сервера</div>
+  </div>
+
   <!-- VOICE -->
   <div class="section">
     <div class="section-head"><h2>Голосовое общение</h2></div>
@@ -1337,6 +1366,7 @@ PANEL_HTML = """
   let aiModes = { stt: 'local', tts: 'local', llm: 'local' };
   let memoryFlags = { stm: true, ltm: true, profile: true, rag: true };
   let modelConfig = { llm: {mode:'local', current:null, local_models:[], cloud_models:[]}, stt: {current:null, models:[]}, tts: {mode:'local', current:null, speakers:[]} };
+  let quickAnswersStatus = { enabled: true, count: 0 };
 
   ws.onopen = () => {
     document.getElementById('status-dot').classList.add('online');
@@ -1348,6 +1378,7 @@ PANEL_HTML = """
     ws.send(JSON.stringify({type:'video_pref', enabled: videoPrefEnabled}));
     fetchMemoryConfig();
     fetchModelConfig();
+    fetchQuickAnswersStatus();
   };
   ws.onclose = () => {
     document.getElementById('status-dot').classList.remove('online');
@@ -1609,6 +1640,37 @@ PANEL_HTML = """
       if (data.status === 'ok') {
         if (data.model_config) { modelConfig = data.model_config; }
         log(`Голос TTS → ${speaker} ✓`);
+      } else {
+        log('Ошибка: ' + (data.message || 'неизвестная'));
+      }
+    } catch(e) { log('Сетевая ошибка: ' + e.message); }
+  }
+
+  async function fetchQuickAnswersStatus() {
+    try {
+      const r = await fetch('/status');
+      const data = await r.json();
+      if (data.quick_answers) { quickAnswersStatus = data.quick_answers; updateQuickAnswersUI(); }
+    } catch(e) { log('Не удалось получить статус быстрых ответов: ' + e.message); }
+  }
+
+  function updateQuickAnswersUI() {
+    const txt = document.getElementById('qa-count-text');
+    if (!txt) return;
+    txt.textContent = quickAnswersStatus.enabled
+      ? `${quickAnswersStatus.count} записей`
+      : 'выключено (config.yaml)';
+  }
+
+  async function reloadQuickAnswers() {
+    log('Перезагружаю словарь быстрых ответов…');
+    try {
+      const r = await fetch('/quick_answers/reload', {method:'POST'});
+      const data = await r.json();
+      if (data.status === 'ok') {
+        quickAnswersStatus = data.quick_answers;
+        updateQuickAnswersUI();
+        log(`Словарь быстрых ответов обновлён ✓ (${quickAnswersStatus.count} записей)`);
       } else {
         log('Ошибка: ' + (data.message || 'неизвестная'));
       }

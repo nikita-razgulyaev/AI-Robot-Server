@@ -120,6 +120,8 @@ CLOUD_MODEL_NAME = CLOUD_MODEL_NAME or ""
 LLM_LOCAL_MODELS = _config.get("llm", {}).get("local_models", [])
 LLM_CLOUD_MODELS = _config.get("llm", {}).get("cloud_models", [])
 
+QUICK_ANSWERS_ENABLED = bool(_config.get("quick_answers", {}).get("enabled", True))
+
 # Vision
 YOLO_MODEL = MODELS_DIR / "yolov8n.pt"
 ENABLE_POSE_TRACKING = _config.get("vision", {}).get("pose_tracking", True)

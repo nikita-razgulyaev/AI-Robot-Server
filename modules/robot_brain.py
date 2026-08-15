@@ -14,12 +14,14 @@ from modules.audio_buffer import AudioBuffer
 from modules.servo_controller import ServoController
 from modules.memory import MemoryManager
 from modules import memory_flags
+from modules.quick_answers import quick_answers
 from config.settings import (
     CHARACTER_DIR,
     FAST_MODE,
     LLM_LOCAL_MODELS,
     LLM_CLOUD_MODELS,
     WHISPER_MODELS,
+    QUICK_ANSWERS_ENABLED,
     FACE_TRACKING_ENABLED,
     DIALOG_ACTIVE_TIMEOUT_SEC,
     PROVISIONAL_DIALOG_TIMEOUT_SEC,
@@ -233,6 +235,14 @@ class RobotBrain:
     def set_tts_speaker(self, speaker: str):
         self.tts.set_speaker(speaker)
 
+    def get_quick_answers_status(self) -> Dict:
+        return {"enabled": QUICK_ANSWERS_ENABLED, "count": quick_answers.count()}
+
+    def reload_quick_answers(self) -> Dict:
+        """Перечитывает character/quick_answers.json с диска — без рестарта сервера"""
+        count = quick_answers.reload()
+        return {"enabled": QUICK_ANSWERS_ENABLED, "count": count}
+
     async def process_audio_chunk(self, pcm_bytes: bytes) -> Optional[dict]:
         status, audio = self.audio_buffer.process_chunk(pcm_bytes)
 
@@ -290,11 +300,10 @@ class RobotBrain:
         logger.info(f"Пользователь: {user_text}")
         self.mark_dialog_active()
 
-        # Собираем полный контекст памяти
-        memory_context = self._build_memory_context(user_text)
+        # Словарь быстрых ответов → память → LLM — вся логика теперь в одном
+        # месте (см. generate_reply), чтобы не размножать её по каждой точке входа.
+        llm_result = self.generate_reply(user_text)
 
-        logger.info("Генерация ответа Сорена...")
-        llm_result = self.llm.generate(user_text, self.vision_context, memory_context)
         response_text = llm_result["text"]
         action = llm_result.get("action")
         emotion = llm_result.get("emotion", "calm")
@@ -334,6 +343,45 @@ class RobotBrain:
             "eye_led": eye_led
         }
 
+    def _try_quick_answer(self, user_text: str) -> Optional[dict]:
+        """Проверяет словарь быстрых ответов (character/quick_answers.json) ДО
+        похода в память и LLM. Если находится совпадение — Сорен отвечает
+        мгновенно, без единого обращения к llama.cpp/облаку. Возвращает dict
+        в том же формате, что и LLMEngine.generate(), либо None (тогда
+        вызывающий код идёт обычным путём через LLM)."""
+        if not QUICK_ANSWERS_ENABLED:
+            return None
+
+        qa = quick_answers.find(user_text)
+        if qa is None:
+            return None
+
+        logger.info(f"⚡ Быстрый ответ '{qa.id}' (без LLM): {user_text!r} → {qa.response!r}")
+        return {"text": qa.response, "action": qa.action, "emotion": qa.emotion or "calm"}
+
+    def generate_reply(self, user_text: str) -> dict:
+        """Единая точка получения ответа Сорена на текст пользователя — сначала
+        словарь быстрых ответов, затем (если не сработало) память + LLM.
+
+        ВАЖНО: это единственное место, где должен вызываться self.llm.generate().
+        Все остальные точки входа (голос, текстовый чат по WS, HTTP /speak,
+        HTTP /voice) обязаны идти через этот метод, а не звать
+        self.llm.generate() напрямую — иначе словарь быстрых ответов будет
+        молча пропущен именно для этого пути (см. историю бага: /speak и
+        /voice изначально звали LLM напрямую и словарь на них не действовал).
+
+        Возвращает dict {"text", "action", "emotion"} — тот же формат,
+        что и LLMEngine.generate().
+        """
+        quick = self._try_quick_answer(user_text)
+        if quick is not None:
+            if self.memory:
+                self.memory.record_interaction(user_text, quick["text"], quick["emotion"])
+            return quick
+
+        memory_context = self._build_memory_context(user_text)
+        return self.llm.generate(user_text, self.vision_context, memory_context)
+
     def _build_memory_context(self, user_text: str) -> str:
         """Собирает контекст для LLM из памяти — каждый уровень (stm/ltm/profile)
         независимо включается/выключается через memory_flags (панель /panel),
@@ -367,10 +415,8 @@ class RobotBrain:
 
     def _handle_text_command_sync(self, user_text: str) -> dict:
         """Синхронное тело обработки текстовой команды (LLM+TTS) — выполняется в фоновом потоке"""
-        # Собираем контекст памяти
-        memory_context = self._build_memory_context(user_text)
+        llm_result = self.generate_reply(user_text)
 
-        llm_result = self.llm.generate(user_text, self.vision_context, memory_context)
         emotion = llm_result.get("emotion", "calm")
         servo_angles = self.emotion_engine.get_servo_angles(emotion)
         eye_led = self.emotion_engine.get_eye_led(emotion)
@@ -573,7 +619,8 @@ class RobotBrain:
                 "memory": self.memory.short_term.get_summary() if self.memory else {},
                 "ltm_enabled": self.memory.long_term.enabled if self.memory else False,
                 "memory_flags": self.get_memory_flags(),
-                "model_config": self.get_model_config()
+                "model_config": self.get_model_config(),
+                "quick_answers": self.get_quick_answers_status()
             }
 
         elif cmd_type == "clear_history":
@@ -628,6 +675,9 @@ class RobotBrain:
                 return {"status": "error", "message": "Не указан speaker"}
             self.set_tts_speaker(speaker)
             return {"status": "ok", "model_config": self.get_model_config()}
+
+        elif cmd_type == "reload_quick_answers":
+            return {"status": "ok", "quick_answers": self.reload_quick_answers()}
 
         else:
             return {"status": "error", "message": f"Неизвестная команда: {cmd_type}"}
