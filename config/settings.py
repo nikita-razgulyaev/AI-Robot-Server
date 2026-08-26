@@ -122,6 +122,13 @@ LLM_CLOUD_MODELS = _config.get("llm", {}).get("cloud_models", [])
 
 QUICK_ANSWERS_ENABLED = bool(_config.get("quick_answers", {}).get("enabled", True))
 
+BACKLIGHT_AUTO_DEFAULT = bool(_config.get("backlight", {}).get("enabled", False))
+BACKLIGHT_MANUAL_DEFAULT = bool(_config.get("backlight", {}).get("manual_state", False))
+BACKLIGHT_LATITUDE = float(_config.get("backlight", {}).get("latitude", 59.2239))
+BACKLIGHT_LONGITUDE = float(_config.get("backlight", {}).get("longitude", 39.8845))
+BACKLIGHT_TIMEZONE = _config.get("backlight", {}).get("timezone", "Europe/Moscow")
+BACKLIGHT_CHECK_INTERVAL_SEC = int(_config.get("backlight", {}).get("check_interval_sec", 60))
+
 # Vision
 YOLO_MODEL = MODELS_DIR / "yolov8n.pt"
 ENABLE_POSE_TRACKING = _config.get("vision", {}).get("pose_tracking", True)

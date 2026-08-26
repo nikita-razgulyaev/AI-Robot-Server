@@ -12,12 +12,15 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, F
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from modules.robot_brain import RobotBrain
 from modules.auth import create_session_token, verify_session_token, is_valid_device_ping
+from modules import backlight_state
+from modules.backlight import is_night
 from config.settings import (
     SERVER_HOST, SERVER_PORT,
     VIDEO_PANEL_MIN_INTERVAL_SEC, VIDEO_PANEL_JPEG_QUALITY,
     SERVO_UPDATE_MIN_INTERVAL_SEC,
     PANEL_PASSWORD, DEVICE_KEY,
     SESSION_COOKIE_NAME, SESSION_SHORT_MAX_AGE_SEC, SESSION_REMEMBER_MAX_AGE_SEC,
+    BACKLIGHT_LATITUDE, BACKLIGHT_LONGITUDE, BACKLIGHT_TIMEZONE, BACKLIGHT_CHECK_INTERVAL_SEC,
 )
 
 logging.basicConfig(
@@ -61,6 +64,11 @@ async def startup():
     global robot_brain
     logger.info("🦉 Запуск сервера Сорена...")
     robot_brain = RobotBrain()
+    robot_brain.on_servo_frame = broadcast_servo_angles_to_devices
+    # Fallback: подключаем напрямую к ServoController, чтобы ручное управление
+    # из панели (servo / servo_multi) тоже уходило на ESP32
+    robot_brain.servos.on_servo_frame = broadcast_servo_angles_to_devices
+    asyncio.create_task(_backlight_loop())
     logger.info(f"✅ Сервер готов: ws://{SERVER_HOST}:{SERVER_PORT}")
 
 @app.on_event("shutdown")
@@ -93,6 +101,7 @@ async def status():
         "memory_flags": robot_brain.get_memory_flags(),
         "model_config": robot_brain.get_model_config(),
         "quick_answers": robot_brain.get_quick_answers_status(),
+        "backlight": {**backlight_state.get_state(), "effective": compute_effective_backlight_state()},
         "connections": len(active_connections),
         "panel_connections": len(panel_connections),
         "device_connections": len(device_connections),
@@ -216,6 +225,34 @@ async def set_memory_config(level: str = Form(...), enabled: str = Form(...)):
 
     return JSONResponse(result)
 
+@app.post("/backlight")
+async def set_backlight(mode: str = Form(...), enabled: str = Form(...)):
+    """
+    Управление подсветкой-ночником в подставке.
+    mode: "auto" (закат-рассвет + подключение устройства) или "manual" (ручной тумблер)
+    enabled: "1"/"0"
+    """
+    if mode not in ("auto", "manual"):
+        return JSONResponse(
+            {"status": "error", "message": "Invalid mode. Use 'auto' or 'manual'"},
+            status_code=400
+        )
+
+    enabled_bool = enabled.lower() in ("1", "true", "yes", "on")
+    if mode == "auto":
+        state = backlight_state.set_auto(enabled_bool)
+    else:
+        state = backlight_state.set_manual(enabled_bool)
+
+    await refresh_backlight(force=True)
+    logger.info(f"💡 Подсветка: {mode} → {'вкл' if enabled_bool else 'выкл'}")
+
+    return JSONResponse({
+        "status": "ok",
+        "backlight": state,
+        "effective": compute_effective_backlight_state()
+    })
+
 @app.post("/quick_answers/reload")
 async def reload_quick_answers():
     """Перечитывает character/quick_answers.json с диска — без рестарта сервера.
@@ -269,7 +306,7 @@ async def speak_text(text: str = Form(...)):
             logger.warning("TTS не вернул аудио — отправляем текстовый ответ без озвучки")
 
         if action:
-            asyncio.create_task(robot_brain.servos.play_animation(action))
+            asyncio.create_task(robot_brain.servos.play_animation(action, on_frame=robot_brain.on_servo_frame))
         else:
             robot_brain.servos.set_all_servos(servo_angles)
 
@@ -356,7 +393,7 @@ async def voice_input(
         tts_audio = robot_brain.tts.synthesize(response_text)
 
         if action:
-            asyncio.create_task(robot_brain.servos.play_animation(action))
+            asyncio.create_task(robot_brain.servos.play_animation(action, on_frame=robot_brain.on_servo_frame))
         else:
             robot_brain.servos.set_all_servos(servo_angles)
 
@@ -463,6 +500,139 @@ async def websocket_endpoint(websocket: WebSocket):
         panel_wants_video.pop(websocket, None)
 
 
+async def send_audio_to_device(websocket: WebSocket, audio_bytes: bytes, chunk_size: int = 4096):
+    """Шлёт TTS-аудио устройству кусками с троттлингом.
+
+    4096 байт PCM 16-bit mono 48kHz = ~43 мс аудио.
+    Спим ~30 мс между чанками — ESP32 успевает записать в I2S и вызвать
+    webSocket.loop(), не переполняя TCP receive buffer.
+    """
+    target = websocket if websocket in device_connections else None
+
+    if target is None:
+        if not device_connections:
+            logger.warning("📡 [TX audio] исходное устройство отключилось, доставить некому")
+            return
+        target = next(iter(device_connections))
+        logger.info(
+            f"📡 [TX audio] исходное соединение устарело, отправляю на "
+            f"{target.client.host}:{target.client.port} вместо него"
+        )
+
+    total_chunks = (len(audio_bytes) + chunk_size - 1) // chunk_size
+    logger.info(f"📡 [TX audio] отправка {len(audio_bytes)} байт ({total_chunks} чанков) → "
+                f"{target.client.host}:{target.client.port}")
+    start_ts = asyncio.get_event_loop().time()
+
+    # ~43 мс на чанк; спим 30 мс, чтобы ESP32 успевал опустошать буфер
+    chunk_audio_ms = (chunk_size / (48000 * 2)) * 1000
+    sleep_ms = max(10, chunk_audio_ms * 0.7)
+
+    try:
+        for idx, offset in enumerate(range(0, len(audio_bytes), chunk_size)):
+            chunk = audio_bytes[offset:offset + chunk_size]
+            await asyncio.wait_for(target.send_bytes(b"AUDI" + chunk), timeout=5.0)
+
+            # Троттлинг + yield event loop (обработка входящих ping/pong)
+            if idx < total_chunks - 1:
+                await asyncio.sleep(sleep_ms / 1000)
+
+        elapsed = asyncio.get_event_loop().time() - start_ts
+        logger.info(f"📡 [TX audio] отправлено за {elapsed:.2f}с")
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"📡 [TX audio] TIMEOUT — отправка зависла (>5с на чанке) для "
+            f"{target.client.host}:{target.client.port}, разрываю"
+        )
+        device_connections.discard(target)
+        active_connections.discard(target)
+    except Exception as e:
+        logger.warning(f"📡 [TX audio] failed to {target.client.host}:{target.client.port}: {e}")
+        device_connections.discard(target)
+        active_connections.discard(target)
+
+
+async def broadcast_servo_angles_to_devices(angles: List[int]):
+    """Шлёт полный кадр углов (18 int) всем подключённым устройствам как
+    servo_update — используется как on_frame-коллбэк для
+    ServoController.play_animation() (см. RobotBrain.on_servo_frame), чтобы
+    кадры анимации/жеста реально доезжали до ESP32 по сети, а не оставались
+    только в Python-состоянии ServoController (hardware_available там всегда
+    False — сервер сам ничего не умеет двигать напрямую)."""
+    if not device_connections:
+        logger.debug("📡 [TX servo] broadcast skipped — no device connections")
+        return
+    servo_cmd = {"type": "servo_update", "angles": {str(i): a for i, a in enumerate(angles)}}
+    logger.info(f"📡 [TX servo] broadcast → {len(device_connections)} device(s), angles: {angles}")
+    dead = []
+    for conn in list(device_connections):
+        try:
+            await conn.send_json(servo_cmd)
+            logger.debug(f"📡 [TX servo] sent to {conn.client.host}:{conn.client.port}")
+        except Exception as e:
+            logger.warning(f"📡 [TX servo] failed to {conn.client.host}:{conn.client.port}: {e}")
+            dead.append(conn)
+    for conn in dead:
+        device_connections.discard(conn)
+        active_connections.discard(conn)
+
+
+def compute_effective_backlight_state() -> bool:
+    """Эффективное состояние подсветки-ночника прямо сейчас:
+    - авто-режим включён → горит, если есть хоть одно подключённое устройство
+      И сейчас между закатом и рассветом (см. modules/backlight.py);
+    - авто-режим выключен → просто ручное состояние с панели."""
+    state = backlight_state.get_state()
+    if state["auto"]:
+        connected = len(device_connections) > 0
+        return connected and is_night(BACKLIGHT_LATITUDE, BACKLIGHT_LONGITUDE, BACKLIGHT_TIMEZONE)
+    return state["manual"]
+
+
+async def broadcast_backlight_to_devices(enabled: bool):
+    """Шлёт команду подсветки всем подключённым устройствам"""
+    cmd = {"type": "backlight", "enabled": enabled}
+    dead = []
+    for conn in list(device_connections):
+        try:
+            await conn.send_json(cmd)
+        except Exception:
+            dead.append(conn)
+    for conn in dead:
+        device_connections.discard(conn)
+        active_connections.discard(conn)
+
+
+_last_backlight_state: Optional[bool] = None
+
+
+async def refresh_backlight(force: bool = False):
+    """Пересчитывает эффективное состояние подсветки и, если оно изменилось
+    (или force=True — сразу после ручного переключения в панели), рассылает
+    устройствам. Регулярный вызов — из фонового цикла _backlight_loop(),
+    который также подхватывает переход заката/рассвета и смену подключения
+    устройства в течение BACKLIGHT_CHECK_INTERVAL_SEC."""
+    global _last_backlight_state
+    effective = compute_effective_backlight_state()
+    if force or effective != _last_backlight_state:
+        await broadcast_backlight_to_devices(effective)
+        _last_backlight_state = effective
+        logger.info(f"💡 Подсветка-ночник: {'ВКЛ' if effective else 'выкл'}")
+
+
+async def _backlight_loop():
+    """Фоновый цикл — раз в BACKLIGHT_CHECK_INTERVAL_SEC пересчитывает и,
+    при изменении, рассылает состояние подсветки. Именно так подхватываются
+    переход через закат/рассвет и (не)подключение устройства — без этого
+    цикла авто-режим сработал бы только один раз, при старте сервера."""
+    while True:
+        try:
+            await refresh_backlight()
+        except Exception as e:
+            logger.error(f"Ошибка в цикле подсветки: {e}")
+        await asyncio.sleep(BACKLIGHT_CHECK_INTERVAL_SEC)
+
+
 async def broadcast_to_panels(message: dict, recipients: Optional[Set[WebSocket]] = None):
     """Рассылает JSON-сообщение панелям мониторинга. Если recipients не указан —
     всем подключённым панелям; иначе — только переданному подмножеству
@@ -489,6 +659,11 @@ async def handle_text_message(websocket: WebSocket, text: str):
         if msg_type in ["servo", "servo_multi", "animation", "text", "get_status", "clear_history", "set_mode"]:
             result = await robot_brain.handle_command(data)
             await websocket.send_json(result)
+            # Гарантированная отправка на ESP32 после ручного управления сервами из панели
+            if msg_type in ("servo", "servo_multi") and device_connections:
+                angles = robot_brain.servos.get_current_angles()
+                logger.info(f"📡 [TX servo] manual {msg_type} trigger → broadcasting to {len(device_connections)} device(s)")
+                await broadcast_servo_angles_to_devices(angles)
         elif msg_type == "ping":
             # ESP32 шлёт "ping" первым сообщением сразу после коннекта (см. .ino,
             # WStype_CONNECTED) — панель мониторинга такое никогда не шлёт. Это уже
@@ -595,8 +770,7 @@ async def handle_binary_message(websocket: WebSocket, data: bytes):
                 await websocket.send_json(response)
 
                 if result["audio"] and audio_output_mode == "robot":
-                    audio_packet = b"AUDI" + result["audio"]
-                    await websocket.send_bytes(audio_packet)
+                    await send_audio_to_device(websocket, result["audio"])
 
         elif data_type == "VIDE":
             vision_result = await robot_brain.process_video_frame(payload)
@@ -619,11 +793,15 @@ async def _send_servo_update(websocket: WebSocket, vision_result: dict):
     """Шлёт servo_update на ESP32: не чаще SERVO_UPDATE_MIN_INTERVAL_SEC и только
     ИЗМЕНИВШИЕСЯ углы (delta) — интерполяция на прошивке и так плавно доедет между
     редкими целями, полный массив на каждый кадр не нужен."""
+    # FIX: не пытаться отправить в соединение, которое уже мёртво
+    if websocket not in device_connections:
+        return
     servo_angles = vision_result["servo_angles"]
     now = asyncio.get_event_loop().time()
     last_send_ts, last_sent_angles = _last_servo_send.get(websocket, (None, None))
 
     if last_send_ts is not None and (now - last_send_ts) < SERVO_UPDATE_MIN_INTERVAL_SEC:
+        logger.debug(f"📡 [TX servo] throttled to {websocket.client.host}:{websocket.client.port}")
         return
 
     if last_sent_angles is None:
@@ -635,6 +813,7 @@ async def _send_servo_update(websocket: WebSocket, vision_result: dict):
     if not delta:
         # Ничего не изменилось — не спамим сеть, но время последней проверки обновляем
         _last_servo_send[websocket] = (now, last_sent_angles)
+        logger.debug(f"📡 [TX servo] no delta to {websocket.client.host}:{websocket.client.port}")
         return
 
     servo_cmd = {
@@ -644,6 +823,7 @@ async def _send_servo_update(websocket: WebSocket, vision_result: dict):
         "face_offset": vision_result["face_offset"],
         "dialog_active": vision_result.get("dialog_active", False)
     }
+    logger.info(f"📡 [TX servo] delta to {websocket.client.host}:{websocket.client.port}: {delta}")
     await websocket.send_json(servo_cmd)
     _last_servo_send[websocket] = (now, list(servo_angles))
 
@@ -1295,6 +1475,33 @@ PANEL_HTML = """
     <div class="core-note">Правки в JSON применяются сразу после нажатия «Обновить» — без рестарта сервера</div>
   </div>
 
+  <!-- BACKLIGHT -->
+  <div class="section">
+    <div class="section-head">
+      <h2>Подсветка подставки</h2>
+      <span class="tag" id="backlight-effective-tag">—</span>
+    </div>
+    <div class="audio-grid">
+      <div class="audio-row">
+        <span class="label">Авто (закат-рассвет + подключение)</span>
+        <span class="audio-state" id="backlight-auto-text">—</span>
+        <label class="switch">
+          <input type="checkbox" id="backlight-auto-toggle" onchange="setBacklightMode('auto', this.checked)">
+          <span class="track"></span>
+        </label>
+      </div>
+      <div class="audio-row">
+        <span class="label">Вручную</span>
+        <span class="audio-state" id="backlight-manual-text">—</span>
+        <label class="switch">
+          <input type="checkbox" id="backlight-manual-toggle" onchange="setBacklightMode('manual', this.checked)">
+          <span class="track"></span>
+        </label>
+      </div>
+    </div>
+    <div class="core-note">Ручной тумблер работает, только пока авто-режим выключен — координаты по умолчанию: Вологда (config.yaml → backlight)</div>
+  </div>
+
   <!-- VOICE -->
   <div class="section">
     <div class="section-head"><h2>Голосовое общение</h2></div>
@@ -1344,10 +1551,6 @@ PANEL_HTML = """
     <div class="servo-grid" id="servo-grid-main"></div>
     <div class="servo-block-label">Прямое подключение · Каналы 16–17</div>
     <div class="servo-grid" id="servo-grid-direct" style="grid-template-columns:repeat(8,1fr);"></div>
-    <div class="servo-actions">
-      <button class="btn primary" onclick="setAllServos()">Применить все</button>
-      <button class="btn" onclick="resetServos()">Сбросить в 90°</button>
-    </div>
   </div>
 
   <!-- LOG -->
@@ -1367,6 +1570,7 @@ PANEL_HTML = """
   let memoryFlags = { stm: true, ltm: true, profile: true, rag: true };
   let modelConfig = { llm: {mode:'local', current:null, local_models:[], cloud_models:[]}, stt: {current:null, models:[]}, tts: {mode:'local', current:null, speakers:[]} };
   let quickAnswersStatus = { enabled: true, count: 0 };
+  let backlightState = { auto: false, manual: false, effective: false };
 
   ws.onopen = () => {
     document.getElementById('status-dot').classList.add('online');
@@ -1379,6 +1583,7 @@ PANEL_HTML = """
     fetchMemoryConfig();
     fetchModelConfig();
     fetchQuickAnswersStatus();
+    fetchBacklightStatus();
   };
   ws.onclose = () => {
     document.getElementById('status-dot').classList.remove('online');
@@ -1549,6 +1754,10 @@ PANEL_HTML = """
       const r = await fetch('/status');
       const data = await r.json();
       if (data.memory_flags) { memoryFlags = data.memory_flags; updateMemoryFlagsUI(); }
+      // FIX: элемент "Connections" в шапке существовал в разметке, но ни один
+      // обработчик его не обновлял — всегда показывал статичный "0".
+      const connEl = document.getElementById('conn-count');
+      if (connEl && typeof data.connections === 'number') connEl.textContent = data.connections;
     } catch(e) { log('Не удалось получить уровни памяти: ' + e.message); }
   }
 
@@ -1671,6 +1880,47 @@ PANEL_HTML = """
         quickAnswersStatus = data.quick_answers;
         updateQuickAnswersUI();
         log(`Словарь быстрых ответов обновлён ✓ (${quickAnswersStatus.count} записей)`);
+      } else {
+        log('Ошибка: ' + (data.message || 'неизвестная'));
+      }
+    } catch(e) { log('Сетевая ошибка: ' + e.message); }
+  }
+
+  async function fetchBacklightStatus() {
+    try {
+      const r = await fetch('/status');
+      const data = await r.json();
+      if (data.backlight) { backlightState = data.backlight; updateBacklightUI(); }
+    } catch(e) { log('Не удалось получить статус подсветки: ' + e.message); }
+  }
+
+  function updateBacklightUI() {
+    const autoBox = document.getElementById('backlight-auto-toggle');
+    const manualBox = document.getElementById('backlight-manual-toggle');
+    const autoText = document.getElementById('backlight-auto-text');
+    const manualText = document.getElementById('backlight-manual-text');
+    const tag = document.getElementById('backlight-effective-tag');
+
+    if (autoBox) autoBox.checked = !!backlightState.auto;
+    if (manualBox) {
+      manualBox.checked = !!backlightState.manual;
+      manualBox.disabled = !!backlightState.auto;
+    }
+    if (autoText) autoText.textContent = backlightState.auto ? 'включён' : 'выключен';
+    if (manualText) manualText.textContent = backlightState.auto ? 'недоступно (авто активен)' : (backlightState.manual ? 'вкл' : 'выкл');
+    if (tag) tag.textContent = backlightState.effective ? 'горит' : 'выкл';
+  }
+
+  async function setBacklightMode(mode, enabled) {
+    log(`Подсветка: ${mode} → ${enabled ? 'вкл' : 'выкл'}…`);
+    const fd = new FormData(); fd.append('mode', mode); fd.append('enabled', enabled ? '1' : '0');
+    try {
+      const r = await fetch('/backlight', {method:'POST', body:fd});
+      const data = await r.json();
+      if (data.status === 'ok') {
+        backlightState = {...data.backlight, effective: data.effective};
+        updateBacklightUI();
+        log(`Подсветка обновлена ✓ (эффективно: ${backlightState.effective ? 'горит' : 'выкл'})`);
       } else {
         log('Ошибка: ' + (data.message || 'неизвестная'));
       }
@@ -1853,20 +2103,46 @@ PANEL_HTML = """
   function makeServo(i) {
     const div = document.createElement('div');
     div.className = 'servo';
-    div.innerHTML = `<div class="ch">CH ${String(i).padStart(2,'0')}</div><div class="deg" id="val-${i}">90°</div><input type="range" id="servo-${i}" min="0" max="180" value="90" oninput="document.getElementById('val-${i}').textContent=this.value+'°'">`;
+    div.innerHTML = `<div class="ch">CH ${String(i).padStart(2,'0')}</div><div class="deg" id="val-${i}">90°</div><input type="range" id="servo-${i}" min="0" max="180" value="90" oninput="onServoSlide(${i}, this.value)">`;
     return div;
   }
-  function setAllServos() {
-    const angles = [];
-    for (let i=0;i<18;i++) angles.push(parseInt(document.getElementById(`servo-${i}`).value));
-    sendCmd({type:'servo_multi', angles});
-  }
-  function resetServos() {
-    for (let i=0;i<18;i++) {
-      document.getElementById(`servo-${i}`).value = 90;
-      document.getElementById(`val-${i}`).textContent = '90°';
+  // Троттлинг на слайдер: угол шлётся сразу, но не чаще раза в SERVO_SLIDER_THROTTLE_MS,
+  // чтобы перетаскивание ползунка (десятки oninput-событий в секунду) не заваливало
+  // сокет и ESP32 очередью устаревших команд. Последнее значение всегда досылается
+  // отдельным таймером, даже если пользователь отпустил ползунок между тиками троттла.
+  const SERVO_SLIDER_THROTTLE_MS = 60;
+  const _servoSlideState = {}; // i -> {lastSentTs, pendingTimeout, pendingAngle}
+  function onServoSlide(i, value) {
+    const angle = parseInt(value);
+    document.getElementById(`val-${i}`).textContent = angle + '°';
+
+    let st = _servoSlideState[i];
+    if (!st) st = _servoSlideState[i] = { lastSentTs: 0, pendingTimeout: null, pendingAngle: null };
+
+    const sendNow = () => {
+      st.lastSentTs = Date.now();
+      st.pendingAngle = null;
+      sendCmd({type:'servo', id:i, angle});
+    };
+
+    const sinceLast = Date.now() - st.lastSentTs;
+    if (sinceLast >= SERVO_SLIDER_THROTTLE_MS) {
+      if (st.pendingTimeout) { clearTimeout(st.pendingTimeout); st.pendingTimeout = null; }
+      sendNow();
+    } else {
+      st.pendingAngle = angle;
+      if (!st.pendingTimeout) {
+        st.pendingTimeout = setTimeout(() => {
+          st.pendingTimeout = null;
+          if (st.pendingAngle !== null) {
+            const finalAngle = st.pendingAngle;
+            st.lastSentTs = Date.now();
+            st.pendingAngle = null;
+            sendCmd({type:'servo', id:i, angle:finalAngle});
+          }
+        }, SERVO_SLIDER_THROTTLE_MS - sinceLast);
+      }
     }
-    sendCmd({type:'servo_multi', angles:new Array(18).fill(90)});
   }
   function updateServoDisplay(angles) {
     for (let i=0;i<angles.length;i++) {

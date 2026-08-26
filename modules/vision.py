@@ -49,6 +49,9 @@ _LIP_BOTTOM = 14
 _LIP_LEFT = 61
 _LIP_RIGHT = 291
 
+# FIX: панельный кадр считается "свежим" только в течение этого времени.
+PANEL_FRAME_MAX_AGE_SEC = 3.0
+
 
 class VisionEngine:
     """Движок компьютерного зрения"""
@@ -94,23 +97,13 @@ class VisionEngine:
         self.all_faces_bbox: List[Tuple[int, int, int, int]] = []
         self.last_frame = None
 
-        # === Поддержка двух видеопотоков от ESP32 (если прошивка обновлена) ===
-        # "VIDE" (частый, маленькое разрешение) → self.last_frame, используется для
-        # детекции. "VIDP" (редкий, покрупнее, только для человека) → self._panel_frame.
-        # Bbox всегда считается в системе координат last_frame на момент детекции
-        # (self._detection_frame_size) и масштабируется под фактический размер кадра
-        # панели при отрисовке — так что если прошивка НЕ обновлена и VIDP не приходит,
-        # всё работает ровно как раньше (self._panel_frame остаётся None → fallback на last_frame).
         self._panel_frame = None
-        self._detection_frame_size: Optional[Tuple[int, int]] = None  # (w, h)
+        self._panel_frame_ts: Optional[float] = None
+        self._detection_frame_size: Optional[Tuple[int, int]] = None
 
-        # Троттлинг тяжёлых детекторов (YOLO/Pose не гоняем на каждый кадр —
-        # см. YOLO_DETECTION_INTERVAL_SEC / POSE_DETECTION_INTERVAL_SEC).
-        # Лицо/трекер/губы намеренно НЕ троттлятся — от их частоты зависит
-        # плавность слежения и скорость выбора говорящего.
         self._last_yolo_run_ts = 0.0
         self._last_pose_run_ts = 0.0
-        self._cached_objects: List[Dict] = []  # последний результат YOLO (переиспользуется между запусками)
+        self._cached_objects: List[Dict] = []
 
     def _init_face_detector(self):
         if FACE_DETECTOR_PROTOTXT.exists() and FACE_DETECTOR_MODEL.exists():
@@ -267,14 +260,16 @@ class VisionEngine:
 
     def update_panel_frame(self, frame_bytes: bytes) -> bool:
         """Принимает более качественный/крупный кадр ТОЛЬКО для показа в панели мониторинга
-        (тег VIDP от прошивки). НЕ запускает детекцию — просто обновляет картинку,
-        которую get_annotated_jpeg() использует как фон (bbox масштабируется отдельно)."""
+        (тег VIDP от прошивки). НЕ запускает детекцию — просто обновляет картинку."""
         try:
             nparr = np.frombuffer(frame_bytes, np.uint8)
             frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             if frame is None:
                 return False
+            # FIX: поворот 90° вправо (по запросу — камера установлена на боку)
+            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
             self._panel_frame = frame
+            self._panel_frame_ts = time.time()
             return True
         except Exception as e:
             logger.error(f"Ошибка декодирования кадра панели (VIDP): {e}")
@@ -312,8 +307,11 @@ class VisionEngine:
             if frame is None:
                 return {"error": "Не удалось декодировать кадр"}
 
+            # FIX: поворот 90° вправо (камера установлена на боку)
+            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+
             self.last_frame = frame
-            self._detection_frame_size = (frame.shape[1], frame.shape[0])  # (w, h)
+            self._detection_frame_size = (frame.shape[1], frame.shape[0])
 
             result = {
                 "objects": [],
@@ -326,9 +324,7 @@ class VisionEngine:
                 "description": ""
             }
 
-            # 1. YOLO Detection (троттлится — см. YOLO_DETECTION_INTERVAL_SEC,
-            # результат нужен только для текстового описания сцены для LLM,
-            # частая переоценка не требуется)
+            # 1. YOLO Detection (троттлится)
             now = time.time()
             if self.yolo is not None and (now - self._last_yolo_run_ts) >= YOLO_DETECTION_INTERVAL_SEC:
                 self._last_yolo_run_ts = now
@@ -355,8 +351,7 @@ class VisionEngine:
                     logger.error(f"Ошибка YOLO: {e}")
             result["objects"] = self._cached_objects
 
-            # 2. Детекция лиц (DNN/Haar) + трекинг между кадрами + активность губ + выбор цели
-            # (намеренно НЕ троттлится — см. комментарий в __init__)
+            # 2. Детекция лиц + трекинг + активность губ + выбор цели
             face_boxes = self._detect_faces(frame)
             tracks = self.tracker.update(face_boxes)
             for track in tracks:
@@ -379,8 +374,7 @@ class VisionEngine:
                 self.face_position = None
                 self.face_bbox = None
 
-            # 3. Pose Tracking (троттлится — см. POSE_DETECTION_INTERVAL_SEC;
-            # руки/плечи не требуют такой же реакции, как голова)
+            # 3. Pose Tracking (троттлится)
             if self.pose is not None and (now - self._last_pose_run_ts) >= POSE_DETECTION_INTERVAL_SEC:
                 self._last_pose_run_ts = now
                 try:
@@ -430,17 +424,20 @@ class VisionEngine:
         return "; ".join(parts)
 
     def get_annotated_jpeg(self, tracking_active: bool = False, quality: int = 70) -> Optional[bytes]:
-        # Показываем кадр панели (крупнее, реже), если прошивка его присылает;
-        # иначе — обычный кадр детекции (полностью обратная совместимость).
-        base_frame = self._panel_frame if self._panel_frame is not None else self.last_frame
+        base_frame = self.last_frame
+        if self._panel_frame is not None and self._panel_frame_ts is not None:
+            age = time.time() - self._panel_frame_ts
+            if age < PANEL_FRAME_MAX_AGE_SEC:
+                base_frame = self._panel_frame
+            else:
+                logger.debug(f"Панельный кадр устарел ({age:.1f}s), используем last_frame")
+
         if base_frame is None:
             return None
 
         frame = base_frame.copy()
         target_bbox = self.face_bbox
 
-        # Bbox посчитан в системе координат last_frame (кадра детекции) — если панель
-        # показывает кадр ДРУГОГО размера (VIDP), масштабируем координаты пропорционально.
         scale_x, scale_y = 1.0, 1.0
         if self._detection_frame_size is not None:
             det_w, det_h = self._detection_frame_size

@@ -5,7 +5,7 @@ import json
 import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Callable, Awaitable
 from modules.stt import STTEngine
 from modules.tts import TTSEngine
 from modules.llm import LLMEngine
@@ -103,6 +103,21 @@ class RobotBrain:
         self.vision_context = ""
         self.is_processing = False
         self.current_emotion = "calm"
+
+        # Кэш последней озвученной фразы — на будущее, для восстановления
+        # передачи после обрыва Wi-Fi (см. audio_resume_request от ESP32).
+        # utterance_id инкрементируется на каждый новый синтез, чтобы файл,
+        # который реально шлёт AUDI-чанки, мог отличить "актуальную" фразу
+        # от устаревшей и повторно отправить именно её, а не всю историю.
+        self.last_tts_audio: bytes = b""
+        self.last_tts_utterance_id: int = 0
+
+        # Коллбэк для доставки кадров анимации на физическое устройство — без
+        # него ServoController.play_animation() работает как чистая Python-
+        # симуляция (hardware_available всегда False), и жесты/анимации
+        # реально не двигают серво. Подключается снаружи в websocket_server.py
+        # (см. startup()), потому что только там есть доступ к device_connections.
+        self.on_servo_frame: Optional[Callable[[List[int]], Awaitable[None]]] = None
 
         # === Фоновые потоки для тяжёлых синхронных операций ===
         # Не даём CV (YOLO/DNN/FaceMesh) и STT/LLM/TTS блокировать asyncio event loop —
@@ -276,7 +291,10 @@ class RobotBrain:
             # поэтому анимацию запускаем здесь, а не внутри воркер-потока.
             action = result.get("action")
             if action:
-                asyncio.create_task(self.servos.play_animation(action))
+                asyncio.create_task(self.servos.play_animation(action, on_frame=self.on_servo_frame))
+            else:
+                # Явно доставляем эмоциональную позу на ESP32 (из потока коллбэк не ушёл)
+                await self._notify_servo_frame()
 
             return result
         finally:
@@ -321,6 +339,9 @@ class RobotBrain:
         tts_audio = self.tts.synthesize(response_text)
 
         if tts_audio:
+            self.last_tts_audio = tts_audio
+            self.last_tts_utterance_id += 1
+
             # Продлеваем подтверждённое окно диалога на время самого озвучивания ответа —
             # оба TTS-движка отдают PCM 16-bit mono 48kHz (см. modules/tts.py), поэтому
             # длительность оцениваем как байты / (48000 * 2). Так голова не "отключится"
@@ -329,8 +350,9 @@ class RobotBrain:
             self.last_interaction_ts = time.time() + estimated_playback_sec
 
         if not action:
-            # Анимацию (если есть) запустит async-обёртка _process_speech — ей нужен event loop
-            self.servos.set_all_servos(servo_angles)
+            # Анимацию (если есть) запустит async-обёртка _process_speech — ей нужен event loop.
+            # notify=False, т.к. мы в фоновом потоке без event loop — уведомим вручную после return.
+            self.servos.set_all_servos(servo_angles, notify=False)
 
         return {
             "text": user_text,
@@ -422,9 +444,14 @@ class RobotBrain:
         eye_led = self.emotion_engine.get_eye_led(emotion)
         tts_audio = self.tts.synthesize(llm_result["text"])
 
+        if tts_audio:
+            self.last_tts_audio = tts_audio
+            self.last_tts_utterance_id += 1
+
         if not llm_result.get("action"):
-            # Анимацию (если есть) запустит handle_command — ей нужен event loop
-            self.servos.set_all_servos(servo_angles)
+            # Анимацию (если есть) запустит handle_command — ей нужен event loop.
+            # notify=False, т.к. мы в фоновом потоке — уведомим вручную после return.
+            self.servos.set_all_servos(servo_angles, notify=False)
 
         return {
             "response": llm_result["text"],
@@ -573,40 +600,47 @@ class RobotBrain:
             return {"status": "ok", "angles": command["angles"]}
 
         elif cmd_type == "animation":
-            asyncio.create_task(self.servos.play_animation(command["name"]))
+            asyncio.create_task(self.servos.play_animation(command["name"], on_frame=self.on_servo_frame))
             return {"status": "ok", "animation": command["name"]}
 
         elif cmd_type == "text":
             self.mark_dialog_active()
+            self.is_processing = True
             try:
-                from modules.fuzzy_matcher import correct_speech_text
-                raw_text = command["text"]
-                corrected_text = correct_speech_text(raw_text)
-                if corrected_text != raw_text:
-                    logger.info(f"🎯 Fuzzy (text): '{raw_text}' → '{corrected_text}'")
-                user_text = corrected_text
-            except ImportError:
-                user_text = command["text"]
+                try:
+                    from modules.fuzzy_matcher import correct_speech_text
+                    raw_text = command["text"]
+                    corrected_text = correct_speech_text(raw_text)
+                    if corrected_text != raw_text:
+                        logger.info(f"🎯 Fuzzy (text): '{raw_text}' → '{corrected_text}'")
+                    user_text = corrected_text
+                except ImportError:
+                    user_text = command["text"]
 
-            loop = asyncio.get_event_loop()
-            # LLM.generate + TTS.synthesize — те же тяжёлые блокирующие вызовы, что и в
-            # голосовом пути (_process_speech), тем же приёмом уводим их в фоновый поток.
-            result = await loop.run_in_executor(self._speech_executor, self._handle_text_command_sync, user_text)
+                loop = asyncio.get_event_loop()
+                # LLM.generate + TTS.synthesize — те же тяжёлые блокирующие вызовы, что и в
+                # голосовом пути (_process_speech), тем же приёмом уводим их в фоновый поток.
+                result = await loop.run_in_executor(self._speech_executor, self._handle_text_command_sync, user_text)
 
-            if result.get("action"):
-                asyncio.create_task(self.servos.play_animation(result["action"]))
+                if result.get("action"):
+                    asyncio.create_task(self.servos.play_animation(result["action"], on_frame=self.on_servo_frame))
+                else:
+                    # Явно доставляем эмоциональную позу на ESP32 (из потока коллбэк не ушёл)
+                    await self._notify_servo_frame()
 
-            return {
-                "status": "ok",
-                "text": user_text,
-                "raw_text": command.get("text", ""),
-                "response": result["response"],
-                "audio": result["audio"].hex() if result["audio"] else "",
-                "action": result.get("action"),
-                "emotion": result["emotion"],
-                "servo_angles": result["servo_angles"],
-                "eye_led": result["eye_led"]
-            }
+                return {
+                    "status": "ok",
+                    "text": user_text,
+                    "raw_text": command.get("text", ""),
+                    "response": result["response"],
+                    "audio": result["audio"].hex() if result["audio"] else "",
+                    "action": result.get("action"),
+                    "emotion": result["emotion"],
+                    "servo_angles": result["servo_angles"],
+                    "eye_led": result["eye_led"]
+                }
+            finally:
+                self.is_processing = False
 
         elif cmd_type == "get_status":
             return {
@@ -681,6 +715,21 @@ class RobotBrain:
 
         else:
             return {"status": "error", "message": f"Неизвестная команда: {cmd_type}"}
+
+    async def _notify_servo_frame(self):
+        """Явно рассылает текущие углы серво на физическое устройство.
+        Используется после возврата из фонового потока _speech_executor,
+        где asyncio event loop недоступен и _notify_servo_frame внутри
+        ServoController молча проглатывается."""
+        if self.on_servo_frame:
+            await self.on_servo_frame(self.servos.get_current_angles())
+
+    def get_last_tts_audio(self) -> tuple:
+        """Возвращает (utterance_id, audio_bytes) последней озвученной фразы —
+        для повторной отправки по запросу ESP32 после обрыва Wi-Fi
+        (audio_resume_request). utterance_id=0 значит, что ещё ничего не
+        озвучивалось."""
+        return self.last_tts_utterance_id, self.last_tts_audio
 
     def shutdown(self):
         logger.info("Завершение работы RobotBrain...")
