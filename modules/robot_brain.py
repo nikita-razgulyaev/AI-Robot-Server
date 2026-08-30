@@ -15,6 +15,7 @@ from modules.servo_controller import ServoController
 from modules.memory import MemoryManager
 from modules import memory_flags
 from modules.quick_answers import quick_answers
+from modules.wake_word import strip_wake_word
 from config.settings import (
     CHARACTER_DIR,
     FAST_MODE,
@@ -189,6 +190,18 @@ class RobotBrain:
         )
         return confirmed_active or provisional_active
 
+    def is_wake_session_active(self) -> bool:
+        """Можно ли обрабатывать команду БЕЗ повторного "Сорен" — та же
+        логика окна, что и у is_dialog_active(), но нарочно только по
+        подтверждённому таймеру (last_interaction_ts), без provisional:
+        одного VAD-сигнала "кто-то говорит" недостаточно, чтобы считать
+        будильник уже произнесённым — сессию открывает только реально
+        распознанная команда (см. mark_dialog_active())."""
+        return (
+            self.last_interaction_ts > 0 and
+            (time.time() - self.last_interaction_ts) < DIALOG_ACTIVE_TIMEOUT_SEC
+        )
+
     def set_stt_mode(self, mode: str):
         self.stt.set_mode(mode)
 
@@ -315,12 +328,26 @@ class RobotBrain:
         if user_text != raw_text:
             logger.info(f"🎯 Fuzzy: используем исправленный текст: '{user_text}'")
 
-        logger.info(f"Пользователь: {user_text}")
+        # Будильник "Сорен" — команды принимаются только сразу после него,
+        # либо пока открыта сессия диалога (см. is_wake_session_active).
+        # Иначе случайная реплика в комнате ("а он вообще слушает?") не
+        # должна улетать в LLM.
+        command_text = strip_wake_word(user_text)
+        if command_text is None:
+            if self.is_wake_session_active():
+                command_text = user_text
+            else:
+                logger.info(f"🔇 Будильник не найден, фраза проигнорирована: '{user_text}'")
+                return self._build_empty_response()
+        else:
+            logger.info(f"👂 Будильник распознан: '{user_text}' → '{command_text or '(пусто)'}'")
+
+        logger.info(f"Пользователь: {command_text or '(только будильник, без команды)'}")
         self.mark_dialog_active()
 
         # Словарь быстрых ответов → память → LLM — вся логика теперь в одном
         # месте (см. generate_reply), чтобы не размножать её по каждой точке входа.
-        llm_result = self.generate_reply(user_text)
+        llm_result = self.generate_reply(command_text)
 
         response_text = llm_result["text"]
         action = llm_result.get("action")
@@ -394,7 +421,14 @@ class RobotBrain:
 
         Возвращает dict {"text", "action", "emotion"} — тот же формат,
         что и LLMEngine.generate().
+
+        user_text == "" — особый случай: будильник "Сорен" был произнесён/
+        написан без команды следом (позвали по имени). Отвечаем коротким
+        "Да?" без похода в quick_answers/LLM — там всё равно нечего искать.
         """
+        if not user_text.strip():
+            return {"text": "Да?", "action": None, "emotion": "calm"}
+
         quick = self._try_quick_answer(user_text)
         if quick is not None:
             if self.memory:
@@ -604,23 +638,36 @@ class RobotBrain:
             return {"status": "ok", "animation": command["name"]}
 
         elif cmd_type == "text":
+            try:
+                from modules.fuzzy_matcher import correct_speech_text
+                raw_text = command["text"]
+                corrected_text = correct_speech_text(raw_text)
+                if corrected_text != raw_text:
+                    logger.info(f"🎯 Fuzzy (text): '{raw_text}' → '{corrected_text}'")
+                user_text = corrected_text
+            except ImportError:
+                user_text = command["text"]
+
+            # Тот же будильник "Сорен", что и в голосовом пути — для
+            # единообразия он нужен и в текстовых командах с панели.
+            command_text = strip_wake_word(user_text)
+            if command_text is None:
+                if self.is_wake_session_active():
+                    command_text = user_text
+                else:
+                    return {
+                        "status": "ignored",
+                        "message": "Команда проигнорирована: нет будильника 'Сорен'",
+                        "text": user_text,
+                    }
+
             self.mark_dialog_active()
             self.is_processing = True
             try:
-                try:
-                    from modules.fuzzy_matcher import correct_speech_text
-                    raw_text = command["text"]
-                    corrected_text = correct_speech_text(raw_text)
-                    if corrected_text != raw_text:
-                        logger.info(f"🎯 Fuzzy (text): '{raw_text}' → '{corrected_text}'")
-                    user_text = corrected_text
-                except ImportError:
-                    user_text = command["text"]
-
                 loop = asyncio.get_event_loop()
                 # LLM.generate + TTS.synthesize — те же тяжёлые блокирующие вызовы, что и в
                 # голосовом пути (_process_speech), тем же приёмом уводим их в фоновый поток.
-                result = await loop.run_in_executor(self._speech_executor, self._handle_text_command_sync, user_text)
+                result = await loop.run_in_executor(self._speech_executor, self._handle_text_command_sync, command_text)
 
                 if result.get("action"):
                     asyncio.create_task(self.servos.play_animation(result["action"], on_frame=self.on_servo_frame))
@@ -630,7 +677,7 @@ class RobotBrain:
 
                 return {
                     "status": "ok",
-                    "text": user_text,
+                    "text": command_text,
                     "raw_text": command.get("text", ""),
                     "response": result["response"],
                     "audio": result["audio"].hex() if result["audio"] else "",
