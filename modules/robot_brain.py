@@ -121,7 +121,7 @@ class RobotBrain:
         self.on_servo_frame: Optional[Callable[[List[int]], Awaitable[None]]] = None
 
         # === Фоновые потоки для тяжёлых синхронных операций ===
-        # Не даём CV (YOLO/DNN/FaceMesh) и STT/LLM/TTS блокировать asyncio event loop —
+        # Не даём CV (YOLO/DNN/Pose) и STT/LLM/TTS блокировать asyncio event loop —
         # иначе на время одного тяжёлого вызова встают ВСЕ подключения (панель, /speak, /voice,
         # другие устройства), а не только текущее. Два ОТДЕЛЬНЫХ пула (а не общий executor
         # asyncio), чтобы долгая генерация ответа LLM не задерживала обработку видео —
@@ -275,19 +275,16 @@ class RobotBrain:
         status, audio = self.audio_buffer.process_chunk(pcm_bytes)
 
         if status == "speech_start":
-            # Начало новой фразы — включаем режим "слежу по губам, кто говорит"
-            # (используется в vision.process_video_frame для выбора цели слежения)
-            # и сразу продлеваем предварительное окно диалога — голова реагирует
-            # ДО того, как фраза будет распознана.
-            self.vision.notify_speech_start()
+            # Начало новой фразы — сразу продлеваем предварительное окно
+            # диалога, чтобы голова начала реагировать ДО того, как фраза
+            # будет распознана (выбор цели слежения теперь всегда идёт по
+            # размеру лица в кадре — см. VisionEngine._select_target).
             self.mark_dialog_provisional()
         elif status == "speech":
             # Человек продолжает говорить — держим предварительное окно свежим,
             # чтобы оно не истекло на середине длинной фразы.
             self.mark_dialog_provisional()
         elif status == "complete" and audio:
-            # Фраза закончилась — прекращаем перевыбор цели по губам до следующей фразы
-            self.vision.notify_speech_end()
             return await self._process_speech(audio)
 
         return None
@@ -510,7 +507,7 @@ class RobotBrain:
 
     async def process_video_frame(self, frame_bytes: bytes) -> dict:
         loop = asyncio.get_event_loop()
-        # CV-обработка (YOLO/DNN-детектор лица/FaceMesh/Pose) — тяжёлая и синхронная,
+        # CV-обработка (YOLO/DNN-детектор лица/Pose) — тяжёлая и синхронная,
         # выполняем в отдельном потоке, чтобы не блокировать event loop на время кадра.
         return await loop.run_in_executor(self._cv_executor, self._process_video_frame_sync, frame_bytes)
 
@@ -526,13 +523,17 @@ class RobotBrain:
         # Слежение за лицом включается ТОЛЬКО во время активного диалога
         dialog_active = FACE_TRACKING_ENABLED and self.is_dialog_active()
 
-        # Углы рук/плеч из позы тела применяются независимо от диалога,
-        # а голову (pan/tilt) двигаем только когда реально следим за лицом —
-        # иначе оставляем её в текущем положении, не дёргая робота.
-        pose_angles = self.vision.get_servo_angles_from_pose()
+        # Раньше здесь Y-координаты плеч/локтей человека (MediaPipe Pose)
+        # автоматически лились в L_FLAP/L_FOLD/R_FLAP/R_FOLD (крылья, 0-3) —
+        # каждый кадр, пока в кадре есть человек. Поскольку поза тела и лицо
+        # детектируются на одном и том же кадре с одним и тем же человеком,
+        # крылья по факту дёргались синхронно с обнаружением лица — то, чего
+        # быть не должно (см. запрос: единственные сервы, реагирующие на
+        # зрение, — голова). Автоматическое зеркалирование позы в крылья
+        # убрано; get_servo_angles_from_pose() в vision.py оставлена как есть
+        # на случай, если понадобится явная поза/жест по команде, но сама по
+        # себе она больше нигде не вызывается из видео-пайплайна.
         servo_angles = self.servos.get_current_angles()
-        for i in range(16):
-            servo_angles[i] = pose_angles[i]
 
         if dialog_active and face_detected:
             # "Снап" в центр нового лица — без сглаживания и без мёртвой зоны —
