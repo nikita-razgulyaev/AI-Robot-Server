@@ -386,8 +386,26 @@ class VisionEngine:
             return None
         return buf.tobytes()
 
-    def get_face_offset(self, frame_width: int, frame_height: int) -> Tuple[float, float]:
-        if self.face_position is None:
+    def get_face_offset(self) -> Tuple[float, float]:
+        """Смещение лица от центра кадра, в диапазоне примерно [-1, 1] по X и Y.
+
+        ВАЖНО: размер берётся из self._detection_frame_size — РЕАЛЬНОГО размера
+        кадра детекции (уже после поворота на 90°, см. process_frame). Раньше
+        здесь принимались параметры frame_width/frame_height, и вызывающий код
+        передавал захардкоженные 640x480, хотя реальный кадр детекции — QVGA
+        320x240, после поворота 240x320. Из-за этого offset считался по неверной
+        шкале и со сдвигом: offset_x почти никогда не становился положительным
+        (голова не доворачивала вправо), а offset_y пересекал ноль только при
+        сильном смещении лица вниз (голова поднималась вверх вместо наклона
+        вниз при умеренном смещении). Теперь размер кадра берётся динамически,
+        поэтому баг воспроизвестись не может, даже если разрешение камеры
+        изменится в будущем.
+        """
+        if self.face_position is None or self._detection_frame_size is None:
+            return (0.0, 0.0)
+
+        frame_width, frame_height = self._detection_frame_size
+        if frame_width <= 0 or frame_height <= 0:
             return (0.0, 0.0)
 
         cx, cy = self.face_position

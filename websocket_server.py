@@ -862,7 +862,11 @@ async def _send_servo_update(websocket: WebSocket, vision_result: dict):
         "face_offset": vision_result["face_offset"],
         "dialog_active": vision_result.get("dialog_active", False)
     }
-    logger.info(f"📡 [TX servo] delta to {websocket.client.host}:{websocket.client.port}: {delta}")
+    logger.info(
+        f"📡 [TX servo] delta to {websocket.client.host}:{websocket.client.port}: "
+        f"{delta} | offset_x={vision_result['face_offset'][0]:.2f} "
+        f"offset_y={vision_result['face_offset'][1]:.2f}"
+    )
     await websocket.send_json(servo_cmd)
     _last_servo_send[websocket] = (now, list(servo_angles))
 

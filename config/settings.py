@@ -150,7 +150,7 @@ FACE_PAN_GAIN = float(_config.get("vision", {}).get("face_pan_gain", 45))
 FACE_TILT_GAIN = float(_config.get("vision", {}).get("face_tilt_gain", 30))
 
 # --- Сглаживание движения головы + "мёртвая зона" (имитация поля зрения) ---
-HEAD_SMOOTHING_ALPHA = float(_config.get("vision", {}).get("head_smoothing_alpha", 0.22))
+HEAD_SMOOTHING_ALPHA = float(_config.get("vision", {}).get("head_smoothing_alpha", 0.16))
 FACE_DEADZONE_X = float(_config.get("vision", {}).get("face_deadzone_x", 0.12))
 FACE_DEADZONE_Y = float(_config.get("vision", {}).get("face_deadzone_y", 0.12))
 

@@ -515,7 +515,7 @@ class RobotBrain:
 
         face_detected = vision_result.get("face_detected", False)
         target_track_id = vision_result.get("target_track_id")
-        raw_offset = self.vision.get_face_offset(640, 480)
+        raw_offset = self.vision.get_face_offset()
 
         # Слежение за лицом включается ТОЛЬКО во время активного диалога
         dialog_active = FACE_TRACKING_ENABLED and self.is_dialog_active()
@@ -545,7 +545,12 @@ class RobotBrain:
                 # если в мёртвой зоне — сглаженное состояние не трогаем, голова держит текущее положение
 
             servo_angles[FACE_PAN_SERVO] = int(90 - self._smoothed_face_offset[0] * FACE_PAN_GAIN)
-            servo_angles[FACE_TILT_SERVO] = int(90 + self._smoothed_face_offset[1] * FACE_TILT_GAIN)
+            # FIX: знак инвертирован намеренно — по логам offset_y > 0 (лицо ниже
+            # центра, нужно наклонить голову ВНИЗ) стабильно приводил к серва-углу
+            # > 90, а физически это поднимало голову. Значит "> 90" на этом
+            # сервоприводе физически соответствует "вверх", а не "вниз" — поэтому
+            # знак смещения здесь должен быть отрицательным, в отличие от пана.
+            servo_angles[FACE_TILT_SERVO] = int(90 - self._smoothed_face_offset[1] * FACE_TILT_GAIN)
 
         elif dialog_active and not face_detected:
             # Диалог всё ещё идёт, лицо на мгновение потерялось (пара кадров) —
@@ -564,7 +569,7 @@ class RobotBrain:
                 self._smoothed_face_offset[0] += EXIT_EASE_ALPHA * (0.0 - self._smoothed_face_offset[0])
                 self._smoothed_face_offset[1] += EXIT_EASE_ALPHA * (0.0 - self._smoothed_face_offset[1])
                 servo_angles[FACE_PAN_SERVO] = int(90 - self._smoothed_face_offset[0] * FACE_PAN_GAIN)
-                servo_angles[FACE_TILT_SERVO] = int(90 + self._smoothed_face_offset[1] * FACE_TILT_GAIN)
+                servo_angles[FACE_TILT_SERVO] = int(90 - self._smoothed_face_offset[1] * FACE_TILT_GAIN)
             # иначе голова уже практически по центру — больше ничего не шлём,
             # чтобы не досылать бесконечные микро-поправки к идеальному нулю
         # (следующий раз, когда диалог начнётся заново, is_reorient сработает
