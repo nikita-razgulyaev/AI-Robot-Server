@@ -269,3 +269,6 @@ SESSION_SECRET = _load_or_create_session_secret()
 SESSION_COOKIE_NAME = "soren_session"
 SESSION_SHORT_MAX_AGE_SEC = 12 * 3600            # без "запомнить это устройство" — 12 часов
 SESSION_REMEMBER_MAX_AGE_SEC = 90 * 24 * 3600    # с галочкой — 90 дней
+
+FACE_PAN_INVERT = False   # True = инвертировать пан (лево-право)
+FACE_TILT_INVERT = False   # True = инвертировать тилт (вверх-вниз)

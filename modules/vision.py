@@ -201,18 +201,20 @@ class VisionEngine:
             return False
 
     def _select_target(self, tracks: List[FaceTrack]):
-        """Держит текущую цель, пока она видна; если пропала — выбирает
-        самое крупное лицо в кадре (обычно ближайший к камере человек)."""
-        if not tracks:
-            self.target_track_id = None
-            return
-
+        """Держит текущую цель, пока трек жив (даже если лицо не детектировалось
+        в этом кадре). Переключается на самое крупное лицо только если текущий
+        трек умер или ещё не выбран."""
         current = self.tracker.get_track(self.target_track_id) if self.target_track_id is not None else None
-        if current is not None and current.missed_frames == 0:
+        if current is not None:
+            # Трек ещё в памяти FaceTracker — не переключаемся, чтобы не было
+            # резкого snap\'a при кратковременном пропадании на 1–2 кадра.
             return
 
-        biggest = max(tracks, key=lambda t: t.bbox[2] * t.bbox[3])
-        self.target_track_id = biggest.id
+        if tracks:
+            biggest = max(tracks, key=lambda t: t.bbox[2] * t.bbox[3])
+            self.target_track_id = biggest.id
+        else:
+            self.target_track_id = None
 
     def process_frame(self, frame_bytes: bytes) -> dict:
         try:

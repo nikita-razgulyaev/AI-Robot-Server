@@ -37,6 +37,16 @@ from config.settings import (
     EXIT_EASE_EPSILON,
 )
 
+# --- safe imports для новых флагов инверсии (обратная совместимость) ---
+try:
+    from config.settings import FACE_PAN_INVERT
+except ImportError:
+    FACE_PAN_INVERT = False
+try:
+    from config.settings import FACE_TILT_INVERT
+except ImportError:
+    FACE_TILT_INVERT = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -336,12 +346,12 @@ class RobotBrain:
                 logger.info(f"🔇 Будильник не найден, фраза проигнорирована: '{user_text}'")
                 return self._build_empty_response()
         else:
-            logger.info(f"👂 Будильник распознан: '{user_text}' → '{command_text or '(пусто)'}'")
+            logger.info(f"👂 Будильник распознан: '{user_text}' -> '{command_text or '(пусто)'}'")
 
         logger.info(f"Пользователь: {command_text or '(только будильник, без команды)'}")
         self.mark_dialog_active()
 
-        # Словарь быстрых ответов → память → LLM — вся логика в одном месте
+        # Словарь быстрых ответов -> память -> LLM — вся логика в одном месте
         # (см. generate_reply), чтобы не размножать её по каждой точке входа.
         llm_result = self.generate_reply(command_text)
 
@@ -401,7 +411,7 @@ class RobotBrain:
         if qa is None:
             return None
 
-        logger.info(f"⚡ Быстрый ответ '{qa.id}' (без LLM): {user_text!r} → {qa.response!r}")
+        logger.info(f"⚡ Быстрый ответ '{qa.id}' (без LLM): {user_text!r} -> {qa.response!r}")
         return {"text": qa.response, "action": qa.action, "emotion": qa.emotion or "calm"}
 
     def generate_reply(self, user_text: str) -> dict:
@@ -544,13 +554,12 @@ class RobotBrain:
                     self._smoothed_face_offset[1] += HEAD_SMOOTHING_ALPHA * (raw_offset[1] - self._smoothed_face_offset[1])
                 # если в мёртвой зоне — сглаженное состояние не трогаем, голова держит текущее положение
 
-            servo_angles[FACE_PAN_SERVO] = int(90 - self._smoothed_face_offset[0] * FACE_PAN_GAIN)
-            # FIX: знак инвертирован намеренно — по логам offset_y > 0 (лицо ниже
-            # центра, нужно наклонить голову ВНИЗ) стабильно приводил к серва-углу
-            # > 90, а физически это поднимало голову. Значит "> 90" на этом
-            # сервоприводе физически соответствует "вверх", а не "вниз" — поэтому
-            # знак смещения здесь должен быть отрицательным, в отличие от пана.
-            servo_angles[FACE_TILT_SERVO] = int(90 - self._smoothed_face_offset[1] * FACE_TILT_GAIN)
+            # Настраиваемое направление: знак зависит от физического монтажа серво.
+            pan_sign = 1 if FACE_PAN_INVERT else -1
+            tilt_sign = 1 if FACE_TILT_INVERT else -1
+
+            servo_angles[FACE_PAN_SERVO] = max(0, min(180, int(90 + pan_sign * self._smoothed_face_offset[0] * FACE_PAN_GAIN)))
+            servo_angles[FACE_TILT_SERVO] = max(0, min(180, int(90 + tilt_sign * self._smoothed_face_offset[1] * FACE_TILT_GAIN)))
 
         elif dialog_active and not face_detected:
             # Диалог всё ещё идёт, лицо на мгновение потерялось (пара кадров) —
@@ -566,14 +575,29 @@ class RobotBrain:
                 abs(self._smoothed_face_offset[1]) > EXIT_EASE_EPSILON
             )
             if still_offset:
+                pan_sign = 1 if FACE_PAN_INVERT else -1
+                tilt_sign = 1 if FACE_TILT_INVERT else -1
+
                 self._smoothed_face_offset[0] += EXIT_EASE_ALPHA * (0.0 - self._smoothed_face_offset[0])
                 self._smoothed_face_offset[1] += EXIT_EASE_ALPHA * (0.0 - self._smoothed_face_offset[1])
-                servo_angles[FACE_PAN_SERVO] = int(90 - self._smoothed_face_offset[0] * FACE_PAN_GAIN)
-                servo_angles[FACE_TILT_SERVO] = int(90 - self._smoothed_face_offset[1] * FACE_TILT_GAIN)
+                servo_angles[FACE_PAN_SERVO] = max(0, min(180, int(90 + pan_sign * self._smoothed_face_offset[0] * FACE_PAN_GAIN)))
+                servo_angles[FACE_TILT_SERVO] = max(0, min(180, int(90 + tilt_sign * self._smoothed_face_offset[1] * FACE_TILT_GAIN)))
             # иначе голова уже практически по центру — больше ничего не шлём,
             # чтобы не досылать бесконечные микро-поправки к идеальному нулю
         # (следующий раз, когда диалог начнётся заново, is_reorient сработает
         # и голова сразу прицелится в центр лица, прервав "оседание" при необходимости)
+
+        # ==================== КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ ====================
+        # Синхронизируем внутреннее состояние серво с вычисленными углами трекера.
+        # Без этого:
+        #   • ползунки в панели показывали бы устаревшие значения;
+        #   • при кратковременной потере лица get_current_angles() возвращал бы
+        #     старые углы (90° или положение ползунка), и _send_servo_update
+        #     отправлял бы голова обратно — отсюда дёргание;
+        #   • ручное управление и трекинг конфликтовали бы при переключении.
+        for i, angle in enumerate(servo_angles):
+            self.servos.current_angles[i] = angle
+            self.servos.target_angles[i] = angle
 
         self._was_dialog_active = dialog_active
         self._last_target_track_id = target_track_id
@@ -639,7 +663,7 @@ class RobotBrain:
                 raw_text = command["text"]
                 corrected_text = correct_speech_text(raw_text)
                 if corrected_text != raw_text:
-                    logger.info(f"🎯 Fuzzy (text): '{raw_text}' → '{corrected_text}'")
+                    logger.info(f"🎯 Fuzzy (text): '{raw_text}' -> '{corrected_text}'")
                 user_text = corrected_text
             except ImportError:
                 user_text = command["text"]
