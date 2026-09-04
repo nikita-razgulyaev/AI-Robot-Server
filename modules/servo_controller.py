@@ -114,6 +114,63 @@ class ServoController:
         """Возвращает текущие углы"""
         return self.current_angles.copy()
 
+    def apply_device_state(self, angles: List[int]):
+        """Принимает РЕАЛЬНЫЕ углы серв, присланные платой (сообщение
+        {"type":"device_state", ...} от ESP32 — см. websocket_server.py).
+        Обновляет current/target_angles БЕЗ повторной отправки на железо и
+        БЕЗ notify — эти данные и так пришли от платы, эхом слать их обратно
+        не нужно (получится бесконечная петля туда-обратно).
+
+        Это единственный источник, которому сервер доверяет как "истине" о
+        физическом положении серв: сам сервер их не двигает (hardware_available
+        тут всегда False), реальное движение — на ESP32."""
+        if len(angles) != 18:
+            logger.warning(f"device_state: неверное количество углов: {len(angles)} != 18, игнорирую")
+            return
+
+        clamped = [max(self.config["min_angle"], min(self.config["max_angle"], int(a))) for a in angles]
+        self.current_angles = clamped
+        self.target_angles = clamped.copy()
+        logger.info(f"📥 Состояние серв синхронизировано с платой: {clamped}")
+
+    async def smooth_return_to_default(
+        self,
+        on_frame: Optional[Callable[[List[int]], Awaitable[None]]] = None,
+        duration_ms: int = 1500,
+        fps: int = 30,
+    ):
+        """Плавно возвращает ВСЕ сервы из текущего состояния (self.current_angles —
+        в идеале только что синхронизированного с платой через apply_device_state)
+        в позу по умолчанию (90° на каждой).
+
+        В отличие от interpolate_to_target() — та пересчитывает шаги мгновенно,
+        без реальной задержки между ними, и уведомляет только один раз в конце,
+        то есть физически это "телепорт", а не плавное движение — эта корутина
+        реально ждёт между кадрами (asyncio.sleep) и на каждом шаге вызывает
+        on_frame, чтобы кадры реально долетали до ESP32 (и панели) по сети,
+        а не оставались только в Python-состоянии."""
+        default_angles = [90] * 18
+        start_angles = self.current_angles.copy()
+        if start_angles == default_angles:
+            logger.info("Сервы уже в позе по умолчанию — плавный возврат не требуется")
+            return
+
+        steps = max(1, int(duration_ms / 1000 * fps))
+        step_delay = (duration_ms / 1000) / steps
+
+        for step in range(1, steps + 1):
+            t = step / steps
+            frame = [
+                int(start_angles[i] + (default_angles[i] - start_angles[i]) * t)
+                for i in range(18)
+            ]
+            self.set_all_servos(frame, notify=False)
+            if on_frame:
+                await on_frame(frame)
+            await asyncio.sleep(step_delay)
+
+        logger.info("Сервы плавно возвращены в позу по умолчанию (90°)")
+
     async def play_animation(self, animation_name: str, on_frame: Optional[Callable[[List[int]], Awaitable[None]]] = None):
         """Воспроизводит анимацию.
 
