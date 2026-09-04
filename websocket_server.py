@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from modules.robot_brain import RobotBrain
 from modules.wake_word import strip_wake_word
+from modules.animation_loader import animation_book
 from modules.auth import create_session_token, verify_session_token, is_valid_device_ping
 from modules import backlight_state
 from modules.backlight import is_night
@@ -79,6 +80,7 @@ async def startup():
     # Fallback: подключаем напрямую к ServoController, чтобы ручное управление
     # из панели (servo / servo_multi) тоже уходило на ESP32
     robot_brain.servos.on_servo_frame = broadcast_servo_angles_to_devices
+    robot_brain.start_background_tasks()
     asyncio.create_task(_backlight_loop())
     logger.info(f"✅ Сервер готов: ws://{SERVER_HOST}:{SERVER_PORT}")
 
@@ -112,6 +114,7 @@ async def status():
         "memory_flags": robot_brain.get_memory_flags(),
         "model_config": robot_brain.get_model_config(),
         "quick_answers": robot_brain.get_quick_answers_status(),
+        "animations": animation_book.list_info(),
         "backlight": {**backlight_state.get_state(), "effective": compute_effective_backlight_state()},
         "connections": len(active_connections),
         "panel_connections": len(panel_connections),
@@ -273,6 +276,18 @@ async def reload_quick_answers():
 
     result = await robot_brain.handle_command({"type": "reload_quick_answers"})
     logger.info(f"⚡ Словарь быстрых ответов перезагружен: {result.get('quick_answers')}")
+
+    return JSONResponse(result)
+
+@app.post("/animations/reload")
+async def reload_animations():
+    """Перечитывает character/animations/*.json с диска — без рестарта сервера.
+    Используется после добавления/правки файла с пользовательской анимацией."""
+    if robot_brain is None:
+        return JSONResponse({"status": "error", "message": "Сервер ещё загружается"})
+
+    result = await robot_brain.handle_command({"type": "reload_animations"})
+    logger.info(f"🎬 Анимации перезагружены: {result.get('count')}")
 
     return JSONResponse(result)
 
@@ -695,7 +710,8 @@ async def handle_text_message(websocket: WebSocket, text: str):
         data = json.loads(text)
         msg_type = data.get("type")
 
-        if msg_type in ["servo", "servo_multi", "animation", "text", "get_status", "clear_history", "set_mode"]:
+        if msg_type in ["servo", "servo_multi", "animation", "text", "get_status", "clear_history", "set_mode",
+                        "list_animations", "reload_animations"]:
             result = await robot_brain.handle_command(data)
             await websocket.send_json(result)
             # Гарантированная отправка на ESP32 после ручного управления сервами из панели
@@ -1695,6 +1711,15 @@ PANEL_HTML = """
             </div>
 
             <div class="tab-pane" data-pane="servos">
+              <div class="mini-card row-between" style="margin-bottom:12px; gap:8px;">
+                <select class="select-line" id="animationSelect" onchange="updateAnimationHint()"></select>
+                <button class="chip-btn" onclick="playSelectedAnimation()" title="Запустить выбранную анимацию">▶ Запустить</button>
+                <button class="chip-btn" onclick="reloadAnimations()" title="Перечитать character/animations/*.json">⟳ Обновить</button>
+              </div>
+              <p class="hint-text" id="animationHint">—</p>
+              <p class="hint-text">
+                Анимации хранятся в <code>character/animations/</code>
+              </p>
               <div class="servo-grid" id="servoGrid"></div>
             </div>
 
@@ -1881,6 +1906,7 @@ PANEL_HTML = """
   let memoryFlags = { stm: true, ltm: true, profile: true, rag: true };
   let modelConfig = { llm: {mode:'local', current:null, local_models:[], cloud_models:[]}, stt: {current:null, models:[]}, tts: {mode:'local', current:null, speakers:[]} };
   let quickAnswersStatus = { enabled: true, count: 0 };
+  let animationsList = [];
   let backlightState = { auto: false, manual: false, effective: false };
 
   // "Connection open/closed" — собственный WS-канал этой панели.
@@ -1904,6 +1930,7 @@ PANEL_HTML = """
     ws.send(JSON.stringify({type:'audio_mode'}));
     ws.send(JSON.stringify({type:'ai_mode'}));
     ws.send(JSON.stringify({type:'video_pref', enabled: videoPrefEnabled}));
+    ws.send(JSON.stringify({type:'list_animations'}));
     fetchStatus();
   };
   ws.onclose = () => {
@@ -1932,6 +1959,7 @@ PANEL_HTML = """
       if (data.ai_modes) { aiModes = data.ai_modes; updateAIModeUI(); }
     }
     if (data.modes && !data.type) { aiModes = data.modes; updateAIModeUI(); }
+    if (data.status === 'ok' && Array.isArray(data.animations)) { animationsList = data.animations; updateAnimationsUI(); }
     if (typeof data.dialog_active === 'boolean') updateDialogBadges(data.face_detected, data.dialog_active);
   };
 
@@ -1943,6 +1971,7 @@ PANEL_HTML = """
       if (data.memory_flags) { memoryFlags = data.memory_flags; updateMemoryFlagsUI(); }
       if (data.model_config) { modelConfig = data.model_config; updateModelSelectsUI(); }
       if (data.quick_answers) { quickAnswersStatus = data.quick_answers; updateQuickAnswersUI(); }
+      if (Array.isArray(data.animations)) { animationsList = data.animations; updateAnimationsUI(); }
       if (data.backlight) { backlightState = data.backlight; updateBacklightUI(); }
       if (data.ai_modes) { aiModes = data.ai_modes; updateAIModeUI(); }
       if (Array.isArray(data.servo_angles)) updateServoDisplay(data.servo_angles);
@@ -2277,6 +2306,48 @@ PANEL_HTML = """
     const txt = document.getElementById('qaCountText');
     if (!txt) return;
     txt.textContent = quickAnswersStatus.enabled ? `${quickAnswersStatus.count} записей` : 'выключено (config.yaml)';
+  }
+
+  // ==================== АНИМАЦИИ (встроенные + character/animations/*.json) ====================
+  function updateAnimationsUI(){
+    const sel = document.getElementById('animationSelect');
+    if (!sel) return;
+    const prevValue = sel.value;
+    sel.innerHTML = '';
+    animationsList.forEach(a => {
+      const opt = document.createElement('option');
+      opt.value = a.name;
+      opt.textContent = a.source === 'custom' ? `${a.name} (своя)` : a.name;
+      sel.appendChild(opt);
+    });
+    if (prevValue && animationsList.some(a => a.name === prevValue)) sel.value = prevValue;
+    updateAnimationHint();
+  }
+  function updateAnimationHint(){
+    const sel = document.getElementById('animationSelect');
+    const hint = document.getElementById('animationHint');
+    if (!sel || !hint) return;
+    const a = animationsList.find(x => x.name === sel.value);
+    if (!a) { hint.textContent = 'Нет доступных анимаций — добавь файл в character/animations/'; return; }
+    const src = a.source === 'custom' ? 'своя' : 'встроенная';
+    const desc = a.description ? ` — ${a.description}` : '';
+    hint.textContent = `${src}, ${a.frame_count} кадр(ов), ${Math.round(a.duration_ms)}мс${desc}`;
+  }
+  function playSelectedAnimation(){
+    const sel = document.getElementById('animationSelect');
+    if (!sel || !sel.value) return;
+    sendCmd({type:'animation', name: sel.value});
+  }
+  async function reloadAnimations(){
+    try {
+      const r = await fetch('/animations/reload', {method:'POST'});
+      const data = await r.json();
+      if (data.status === 'ok'){
+        animationsList = data.animations || [];
+        updateAnimationsUI();
+        log(`Анимации обновлены ✓ (${data.count})`);
+      } else log('Ошибка: ' + (data.message || 'неизвестная'));
+    } catch(e) { log('Сетевая ошибка: ' + e.message); }
   }
 
   // ==================== АУДИО-МАРШРУТИЗАЦИЯ ====================

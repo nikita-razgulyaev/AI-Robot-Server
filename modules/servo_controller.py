@@ -3,7 +3,8 @@ import logging
 import asyncio
 from typing import List, Dict, Optional, Callable, Awaitable
 from pathlib import Path
-from config.settings import SERVO_CONFIG, ANIMATIONS, CHARACTER_DIR
+from config.settings import SERVO_CONFIG, CHARACTER_DIR
+from modules.animation_loader import animation_book
 
 logger = logging.getLogger(__name__)
 
@@ -121,8 +122,13 @@ class ServoController:
         Python-симуляция (self.hardware_available всегда False, реального
         железа тут нет): кадры нигде не появляются, кроме current_angles.
         Коллбэк — единственный способ доставить кадры на физический ESP32 по
-        сети (см. RobotBrain.on_servo_frame, подключается в websocket_server.py)."""
-        if animation_name not in ANIMATIONS:
+        сети (см. RobotBrain.on_servo_frame, подключается в websocket_server.py).
+
+        Анимация ищется среди встроенных (config.settings.ANIMATIONS) И
+        пользовательских (character/animations/*.json, см. modules/animation_loader.py) —
+        обе живут в общем реестре animation_book."""
+        animation = animation_book.get_frames(animation_name)
+        if animation is None:
             logger.warning(f"Анимация не найдена: {animation_name}")
             return
 
@@ -131,7 +137,6 @@ class ServoController:
             return
 
         self.is_animating = True
-        animation = ANIMATIONS[animation_name]
         # Fallback: если внешний on_frame не передан, используем внутренний
         effective_on_frame = on_frame or self.on_servo_frame
 

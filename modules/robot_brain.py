@@ -16,6 +16,7 @@ from modules.memory import MemoryManager
 from modules import memory_flags
 from modules.quick_answers import quick_answers
 from modules.wake_word import strip_wake_word
+from modules.animation_loader import animation_book
 from config.settings import (
     CHARACTER_DIR,
     FAST_MODE,
@@ -35,6 +36,7 @@ from config.settings import (
     FACE_DEADZONE_Y,
     EXIT_EASE_ALPHA,
     EXIT_EASE_EPSILON,
+    IDLE_RETURN_TIMEOUT_SEC,
 )
 
 # --- safe imports для новых флагов инверсии (обратная совместимость) ---
@@ -170,7 +172,69 @@ class RobotBrain:
         self._last_face_bbox = None
         self._last_faces_count = 0
 
+        # === Watchdog простоя: возврат серв в позу "calm" ===
+        # Раньше ничего не возвращало сервы в состояние покоя после окончания
+        # диалога/жеста/эмоции — робот навсегда "застревал" в позе последнего
+        # распознанного действия, и КАЖДЫЙ следующий VAD-триггер (в т.ч. на
+        # шум, даже без успешного распознавания) просто повторно рассылал ту
+        # же самую, уже устаревшую позу на устройство (см. _notify_servo_frame),
+        # создавая впечатление, что робот "завис". _idle_watchdog_loop
+        # (запускается снаружи через start_background_tasks(), нужен running
+        # event loop) периодически проверяет простой и плавно возвращает
+        # тело в "calm", если диалог неактивен уже IDLE_RETURN_TIMEOUT_SEC.
+        self._idle_pose_applied = True  # True = уже в позе покоя, повторно не дёргаем
+        self._dialog_inactive_since: Optional[float] = None
+        self._watchdog_task: Optional[asyncio.Task] = None
+
         logger.info("=== RobotBrain (Сорен + Vector RAG) готов ===")
+
+    def start_background_tasks(self):
+        """Запускает фоновые asyncio-задачи, которым нужен работающий event
+        loop — вызывается из startup() в websocket_server.py, а не из __init__
+        (на момент создания RobotBrain loop ещё может быть не запущен)."""
+        if self._watchdog_task is None:
+            self._watchdog_task = asyncio.create_task(self._idle_watchdog_loop())
+
+    async def _idle_watchdog_loop(self):
+        """Раз в секунду проверяет: если диалог неактивен дольше
+        IDLE_RETURN_TIMEOUT_SEC, ничего не анимируется и не обрабатывается,
+        а сервы всё ещё не в позе "calm" — плавно возвращает их туда и
+        рассылает на устройство. Срабатывает один раз за переход в простой
+        (флаг _idle_pose_applied), а не на каждом тике."""
+        while True:
+            try:
+                await asyncio.sleep(1.0)
+
+                if self.is_dialog_active() or self.is_processing or self.servos.is_animating:
+                    self._dialog_inactive_since = None
+                    continue
+
+                now = time.time()
+                if self._dialog_inactive_since is None:
+                    self._dialog_inactive_since = now
+
+                if self._idle_pose_applied:
+                    continue
+
+                if (now - self._dialog_inactive_since) < IDLE_RETURN_TIMEOUT_SEC:
+                    continue
+
+                calm_angles = self.emotion_engine.get_servo_angles("calm")
+                if self.servos.get_current_angles() == calm_angles:
+                    self._idle_pose_applied = True
+                    continue
+
+                logger.info(
+                    f"😴 Простой {IDLE_RETURN_TIMEOUT_SEC:.0f}с+ — возвращаю сервы в позу покоя"
+                )
+                self.current_emotion = "calm"
+                self.servos.set_all_servos(calm_angles, notify=False)
+                await self._notify_servo_frame()
+                self._idle_pose_applied = True
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Ошибка в idle watchdog: {e}")
 
     def mark_dialog_active(self):
         """Подтверждённое взаимодействие (распознанная речь / текстовая команда) —
@@ -311,8 +375,11 @@ class RobotBrain:
             action = result.get("action")
             if action:
                 asyncio.create_task(self.servos.play_animation(action, on_frame=self.on_servo_frame))
-            else:
-                # Явно доставляем эмоциональную позу на ESP32 (из потока коллбэк не ушёл)
+            elif result.get("servo_changed"):
+                # Явно доставляем эмоциональную позу на ESP32 (из потока коллбэк не ушёл).
+                # Пропускается, когда распознавание ничего не дало (servo_changed=False) —
+                # иначе на каждый ложный VAD-триггер сервер заново рассылал бы одну и ту же
+                # (устаревшую) позу устройству, создавая впечатление "зависания".
                 await self._notify_servo_frame()
 
             return result
@@ -382,10 +449,17 @@ class RobotBrain:
             estimated_playback_sec = len(tts_audio) / (48000 * 2)
             self.last_interaction_ts = time.time() + estimated_playback_sec
 
+        servo_changed = False
         if not action:
             # Анимацию (если есть) запустит async-обёртка _process_speech — ей нужен event loop.
             # notify=False, т.к. мы в фоновом потоке без event loop — уведомим вручную после return.
             self.servos.set_all_servos(servo_angles, notify=False)
+            servo_changed = True
+
+        # Реальное распознавание сбрасывает watchdog простоя — сервы снова
+        # считаются "не в покое" (кроме случая, когда эмоция и так calm).
+        self._idle_pose_applied = (emotion == "calm")
+        self._dialog_inactive_since = None
 
         return {
             "text": user_text,
@@ -395,7 +469,8 @@ class RobotBrain:
             "action": action,
             "emotion": emotion,
             "servo_angles": servo_angles,
-            "eye_led": eye_led
+            "eye_led": eye_led,
+            "servo_changed": servo_changed,
         }
 
     def _try_quick_answer(self, user_text: str) -> Optional[dict]:
@@ -486,10 +561,15 @@ class RobotBrain:
             self.last_tts_audio = tts_audio
             self.last_tts_utterance_id += 1
 
+        servo_changed = False
         if not llm_result.get("action"):
             # Анимацию (если есть) запустит handle_command — ей нужен event loop.
             # notify=False, т.к. мы в фоновом потоке — уведомим вручную после return.
             self.servos.set_all_servos(servo_angles, notify=False)
+            servo_changed = True
+
+        self._idle_pose_applied = (emotion == "calm")
+        self._dialog_inactive_since = None
 
         return {
             "response": llm_result["text"],
@@ -497,10 +577,17 @@ class RobotBrain:
             "action": llm_result.get("action"),
             "emotion": emotion,
             "servo_angles": servo_angles,
-            "eye_led": eye_led
+            "eye_led": eye_led,
+            "servo_changed": servo_changed,
         }
 
     def _build_empty_response(self) -> dict:
+        # servo_changed=False — принципиально: ничего не распознано, значит и
+        # серву трогать не нужно. Раньше этот флаг отсутствовал, и вызывающий
+        # код (_process_speech) всё равно рассылал текущие (устаревшие) углы
+        # на устройство при КАЖДОМ ложном VAD-триггере — отсюда впечатление,
+        # что робот "застревает" в позе после любого шороха. Возврат в покой
+        # после реального простоя делает _idle_watchdog_loop, а не этот путь.
         return {
             "text": "",
             "raw_text": "",
@@ -509,7 +596,8 @@ class RobotBrain:
             "action": None,
             "emotion": "calm",
             "servo_angles": [90] * 18,
-            "eye_led": "soft_white_low"
+            "eye_led": "soft_white_low",
+            "servo_changed": False,
         }
 
     async def process_video_frame(self, frame_bytes: bytes) -> dict:
@@ -654,8 +742,17 @@ class RobotBrain:
             return {"status": "ok", "angles": command["angles"]}
 
         elif cmd_type == "animation":
+            if command["name"] not in animation_book:
+                return {"status": "error", "message": f"Анимация не найдена: {command['name']}"}
             asyncio.create_task(self.servos.play_animation(command["name"], on_frame=self.on_servo_frame))
             return {"status": "ok", "animation": command["name"]}
+
+        elif cmd_type == "list_animations":
+            return {"status": "ok", "animations": animation_book.list_info()}
+
+        elif cmd_type == "reload_animations":
+            count = animation_book.reload()
+            return {"status": "ok", "animations": animation_book.list_info(), "count": count}
 
         elif cmd_type == "text":
             try:
@@ -800,6 +897,8 @@ class RobotBrain:
 
     def shutdown(self):
         logger.info("Завершение работы RobotBrain...")
+        if self._watchdog_task:
+            self._watchdog_task.cancel()
         if self.memory:
             self.memory.save_profile()
         self.vision.release()
