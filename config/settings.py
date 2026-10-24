@@ -144,8 +144,11 @@ DIALOG_ACTIVE_TIMEOUT_SEC = float(_config.get("vision", {}).get("dialog_active_t
 # Даёт голове сразу начать реагировать, но быстро отпускает, если ничего не подтвердилось
 # (шум/кашель). Настоящий диалог держится через DIALOG_ACTIVE_TIMEOUT_SEC (см. is_dialog_active).
 PROVISIONAL_DIALOG_TIMEOUT_SEC = float(_config.get("vision", {}).get("provisional_dialog_timeout_sec", 4))
-FACE_PAN_SERVO = int(_config.get("vision", {}).get("face_pan_servo", 14))
-FACE_TILT_SERVO = int(_config.get("vision", {}).get("face_tilt_servo", 15))
+# Индексы 17/18 — новая карта серв после добавления 2-й платы PCA9685
+# (HEAD_YAW/HEAD_PITCH переехали с 14/15 на 17/18, см. README) — старое
+# значение по умолчанию (14/15) теперь указывало бы на TAIL_YAW/TAIL_SPREAD!
+FACE_PAN_SERVO = int(_config.get("vision", {}).get("face_pan_servo", 17))
+FACE_TILT_SERVO = int(_config.get("vision", {}).get("face_tilt_servo", 18))
 FACE_PAN_GAIN = float(_config.get("vision", {}).get("face_pan_gain", 45))
 FACE_TILT_GAIN = float(_config.get("vision", {}).get("face_tilt_gain", 30))
 
@@ -209,8 +212,8 @@ SERVO_CFG = _config.get("servos", {})
 SERVO_CONFIG = {
     "pca9685_channels": SERVO_CFG.get("pca9685_channels", 16),
     "pca9685_address": SERVO_CFG.get("pca9685_address", 0x40),
+    "pca9685_2_address": SERVO_CFG.get("pca9685_2_address", 0x41),
     "pca9685_freq": SERVO_CFG.get("pca9685_freq", 50),
-    "extra_servos_pins": SERVO_CFG.get("extra_pins", [17, 18]),
     "min_angle": SERVO_CFG.get("min_angle", 0),
     "max_angle": SERVO_CFG.get("max_angle", 180),
 }
@@ -225,30 +228,35 @@ IDLE_RETURN_TIMEOUT_SEC = float(SERVO_CFG.get("idle_return_timeout_sec", 6))
 ANIMATIONS_DIR = CHARACTER_DIR / "animations"
 ANIMATIONS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Анимации
+# Анимации (встроенные) — демонстрационные заглушки на первых 2-4 каналах,
+# не привязаны к конкретным частям тела осмысленно (были такими и до
+# добавления 2-й платы PCA9685). После реиндексации серв каналы 2/3 в этих
+# анимациях физически указывают на другие части (теперь L_WING_TILT/
+# R_WING_FLAP, а не старые R_FLAP/R_FOLD) — для реального использования
+# переделайте под актуальную карту серв.
 ANIMATIONS = {
     "wave": [
-        {"time": 0, "servos": [90]*18},
-        {"time": 200, "servos": [90, 45, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]},
-        {"time": 400, "servos": [90, 135, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]},
-        {"time": 600, "servos": [90, 45, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]},
-        {"time": 800, "servos": [90]*18},
+        {"time": 0, "servos": [90]*22},
+        {"time": 200, "servos": [90, 45, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]},
+        {"time": 400, "servos": [90, 135, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]},
+        {"time": 600, "servos": [90, 45, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]},
+        {"time": 800, "servos": [90]*22},
     ],
     "nod": [
-        {"time": 0, "servos": [90]*18},
-        {"time": 300, "servos": [90, 90, 60, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]},
-        {"time": 600, "servos": [90, 90, 120, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]},
-        {"time": 900, "servos": [90]*18},
+        {"time": 0, "servos": [90]*22},
+        {"time": 300, "servos": [90, 90, 60, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]},
+        {"time": 600, "servos": [90, 90, 120, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]},
+        {"time": 900, "servos": [90]*22},
     ],
     "shake_head": [
-        {"time": 0, "servos": [90]*18},
-        {"time": 200, "servos": [90, 90, 90, 60, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]},
-        {"time": 400, "servos": [90, 90, 90, 120, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]},
-        {"time": 600, "servos": [90, 90, 90, 60, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]},
-        {"time": 800, "servos": [90]*18},
+        {"time": 0, "servos": [90]*22},
+        {"time": 200, "servos": [90, 90, 90, 60, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]},
+        {"time": 400, "servos": [90, 90, 90, 120, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]},
+        {"time": 600, "servos": [90, 90, 90, 60, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]},
+        {"time": 800, "servos": [90]*22},
     ],
     "idle": [
-        {"time": 0, "servos": [90]*18},
+        {"time": 0, "servos": [90]*22},
     ],
 }
 

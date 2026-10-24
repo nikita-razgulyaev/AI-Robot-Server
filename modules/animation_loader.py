@@ -66,10 +66,10 @@ def _validate_frames(frames, context: str) -> Optional[List[Dict]]:
         prev_time = time_ms
 
         servos = frame["servos"]
-        if not isinstance(servos, list) or len(servos) != 18:
+        if not isinstance(servos, list) or len(servos) != 22:
             logger.error(
                 f"Анимация «{context}»: кадр #{idx} — 'servos' должен быть списком "
-                f"ровно из 18 углов, получено {len(servos) if isinstance(servos, list) else type(servos).__name__} — файл пропущен"
+                f"ровно из 22 углов, получено {len(servos) if isinstance(servos, list) else type(servos).__name__} — файл пропущен"
             )
             return None
 

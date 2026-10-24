@@ -89,10 +89,10 @@ class EmotionEngine:
     def get_servo_angles(self, emotion: str) -> List[int]:
         pose = self.get_pose(emotion)
         if not pose:
-            return [90] * 18
+            return [90] * 22
 
         angles = []
-        for i in range(18):
+        for i in range(22):
             key = f"S{i}"
             angles.append(pose.get(key, 90))
         return angles
@@ -663,7 +663,7 @@ class RobotBrain:
             "audio": b"",
             "action": None,
             "emotion": "calm",
-            "servo_angles": [90] * 18,
+            "servo_angles": [90] * 22,
             "eye_led": "soft_white_low",
             "servo_changed": False,
         }

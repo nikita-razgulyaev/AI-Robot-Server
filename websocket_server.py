@@ -670,7 +670,7 @@ async def send_audio_to_device(websocket: WebSocket, audio_bytes: bytes, chunk_s
 
 
 async def broadcast_servo_angles_to_devices(angles: List[int]):
-    """Шлёт полный кадр углов (18 int) всем подключённым устройствам как
+    """Шлёт полный кадр углов (22 int) всем подключённым устройствам как
     servo_update — используется как on_frame-коллбэк для
     ServoController.play_animation() (см. RobotBrain.on_servo_frame), чтобы
     кадры анимации/жеста реально доезжали до ESP32 по сети, а не оставались
@@ -949,9 +949,9 @@ async def handle_text_message(websocket: WebSocket, text: str):
                             idx = int(key)
                         except (TypeError, ValueError):
                             continue
-                        if 0 <= idx < 18:
+                        if 0 <= idx < 22:
                             angles_list[idx] = int(value)
-                elif isinstance(raw_angles, list) and len(raw_angles) == 18:
+                elif isinstance(raw_angles, list) and len(raw_angles) == 22:
                     angles_list = [int(a) for a in raw_angles]
                 robot_brain.servos.apply_device_state(angles_list)
 
@@ -1042,7 +1042,7 @@ async def handle_binary_message(websocket: WebSocket, data: bytes):
                     "robot_text": result["response"],
                     "action": result.get("action"),
                     "emotion": result.get("emotion", "calm"),
-                    "servo_angles": result.get("servo_angles", [90]*18),
+                    "servo_angles": result.get("servo_angles", [90]*22),
                     "eye_led": result.get("eye_led", "soft_white_low"),
                     "ai_modes": robot_brain.get_modes()
                 }
@@ -2656,7 +2656,7 @@ PANEL_HTML = """
 
   // ==================== СЕРВОПРИВОДЫ ====================
   const servoGridEl = document.getElementById('servoGrid');
-  for (let i=0;i<18;i++) servoGridEl.appendChild(makeServo(i));
+  for (let i=0;i<22;i++) servoGridEl.appendChild(makeServo(i));
   function makeServo(i){
     const div = document.createElement('div');
     div.className = 'servo-card';
