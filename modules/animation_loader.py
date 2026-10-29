@@ -20,7 +20,7 @@ MAX_ANGLE = SERVO_CONFIG.get("max_angle", 180)
 class AnimationInfo:
     name: str
     frames: List[Dict]
-    source: str  # "builtin" | "custom"
+    source: str
     description: str = ""
     file: Optional[str] = None
 
@@ -182,5 +182,4 @@ class AnimationBook:
             return name in self._animations
 
 
-# Глобальный экземпляр — грузится один раз при импорте модуля
 animation_book = AnimationBook()

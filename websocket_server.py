@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Set, Optional, Dict, Tuple, List
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from modules.robot_brain import RobotBrain
 from modules.idle_thoughts import IdleThoughts
@@ -42,12 +42,18 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Robot AI Server - Soren", version="3.0")
 
-# Статика для новой панели (изображение совы + фон) — файлы лежат рядом с этим
-# скриптом в static/panel/. Если папки нет (например, при первом деплое) —
-# создаём пустую, чтобы mount() не падал; картинки нужно положить туда вручную
-# (owl-cutout.png, bg-nature.jpg — присланы вместе с этим файлом).
 PANEL_ASSETS_DIR = Path(__file__).resolve().parent / "static" / "panel"
 PANEL_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+@app.get("/favicon.svg", include_in_schema=False)
+async def favicon_svg():
+    return FileResponse(PANEL_ASSETS_DIR / "favicon.svg", media_type="image/svg+xml")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon_ico():
+    return FileResponse(PANEL_ASSETS_DIR / "favicon.ico", media_type="image/x-icon")
+
+
 app.mount("/panel-assets", StaticFiles(directory=str(PANEL_ASSETS_DIR)), name="panel-assets")
 
 robot_brain: RobotBrain = None
@@ -56,19 +62,11 @@ micro_jitter: MicroJitter = None
 gamepad_input: GamepadInput = None
 active_connections: Set[WebSocket] = set()
 
-# Разделяем подключения /ws на "устройство" (ESP32, шлёт бинарные AUDI/VIDE кадры)
-# и "панель" (браузер, инструментальная панель). Новое соединение по умолчанию
-# считается панелью и переклассифицируется в устройство при первом бинарном пакете —
-# так ESP32 не грузится ненужными ей JSON-кадрами видео.
 panel_connections: Set[WebSocket] = set()
 device_connections: Set[WebSocket] = set()
 
 _last_panel_frame_ts = None
 
-# Для каждого устройства помним, что и когда ему последний раз реально отправляли,
-# чтобы слать: а) не чаще SERVO_UPDATE_MIN_INTERVAL_SEC, б) только ИЗМЕНИВШИЕСЯ углы
-# (delta), а не все 18 на каждый кадр — интерполяция на ESP32 и так плавно доедет
-# между редкими целями (см. interpolateServos в прошивке).
 _last_servo_send: Dict[WebSocket, Tuple[float, Optional[List[int]]]] = {}
 
 # Хочет ли конкретная панель получать видео (чекбокс "Показывать видео") —
@@ -76,18 +74,12 @@ _last_servo_send: Dict[WebSocket, Tuple[float, Optional[List[int]]]] = {}
 panel_wants_video: Dict[WebSocket, bool] = {}
 
 # ===== ОБРАТНАЯ СВЯЗЬ ОТ ПЛАТЫ (device_state) =====
-# Когда соединение только что распознано как устройство (ESP32), ждём от него
-# {"type":"device_state", ...} с реальными углами серв/состоянием подсветки —
-# см. _handle_new_device_connection(). Событие в этом словаре "будится"
-# обработчиком device_state (см. handle_text_message), либо срабатывает
-# таймаут DEVICE_STATE_REPLY_TIMEOUT_SEC (совместимость со старой прошивкой,
-# которая device_state ещё не шлёт).
 _state_report_events: Dict[WebSocket, asyncio.Event] = {}
 DEVICE_STATE_REPLY_TIMEOUT_SEC = 1.5
 
 # ===== РАЗДЕЛЬНЫЕ РЕЖИМЫ АУДИО =====
-audio_input_mode = "robot"   # "robot" = ESP32 микрофон, "local" = микрофон ноутбука
-audio_output_mode = "robot"  # "robot" = ESP32 динамик, "local" = наушники ноутбука
+audio_input_mode = "robot"
+audio_output_mode = "robot"
 
 # ===== LIFECYCLE =====
 
@@ -97,9 +89,6 @@ async def startup():
     logger.info("🦉 Запуск сервера Сорена...")
     robot_brain = RobotBrain()
     robot_brain.on_servo_frame = broadcast_servo_state
-    # Fallback: подключаем напрямую к ServoController, чтобы ручное управление
-    # из панели (servo / servo_multi), анимации и плавный возврат в дефолт
-    # уходили и на ESP32, и в панель (см. broadcast_servo_state)
     robot_brain.servos.on_servo_frame = broadcast_servo_state
     robot_brain.start_background_tasks()
     asyncio.create_task(_backlight_loop())
@@ -121,10 +110,8 @@ async def startup():
     else:
         logger.info("[jitter] Микродвижения отключены (config.yaml: micro_jitter.enabled)")
 
-    # Журнал диалога: реплики (голос робота, голос ПК, текст) рассылаются всем панелям
     chat_log.bind(asyncio.get_running_loop(), broadcast_to_panels)
 
-    # Поведение по датчикам опоры (кнопки в лапе/крыле) — реакции из character/behavior/rules.yaml
     behavior_engine.attach(
         servos=robot_brain.servos,
         on_frame=broadcast_servo_state,
@@ -138,7 +125,7 @@ async def startup():
         handle_command=dispatch_command_with_sfx,
         on_state=broadcast_gamepad_state,
     )
-    gamepad_input.start()  # тихо не активируется, если геймпад/pygame не найдены
+    gamepad_input.start()
 
     logger.info(f"✅ Сервер готов: ws://{SERVER_HOST}:{SERVER_PORT}")
 
@@ -404,9 +391,6 @@ async def speak_text(text: str = Form(...), client_id: str = Form("")):
         except ImportError:
             user_text = text
 
-        # Тот же будильник "Сорен", что и в handle_command/_process_speech —
-        # без него /speak оставался бы обходным путём мимо всей логики
-        # активации (см. историю с quick_answers выше по коду).
         command_text = strip_wake_word(user_text)
         if command_text is None:
             if robot_brain.is_wake_session_active():
@@ -420,7 +404,6 @@ async def speak_text(text: str = Form(...), client_id: str = Form("")):
 
         robot_brain.mark_dialog_active()
 
-        # Вопрос — в чат всем панелям сразу (до LLM); id панели совпадает с её локальным, дубля не будет
         user_chat_id = await chat_log.emit_async("user", command_text or user_text, source="panel", chat_id=client_id or None)
 
         loop = asyncio.get_running_loop()
@@ -431,13 +414,11 @@ async def speak_text(text: str = Form(...), client_id: str = Form("")):
 
         if not response_text:
             return JSONResponse({"status": "error", "message": "LLM вернул пустой ответ"})
-        bot_chat_id = await chat_log.emit_async("bot", response_text, emotion=emotion, source="panel")  # до синтеза речи
+        bot_chat_id = await chat_log.emit_async("bot", response_text, emotion=emotion, source="panel")
 
         servo_angles = robot_brain.emotion_engine.get_servo_angles(emotion)
         eye_led = robot_brain.emotion_engine.get_eye_led(emotion)
 
-        # Текст от LLM уже готов — даже если синтез речи не удастся, ответ всё равно
-        # должен дойти до чата (просто без озвучки), а не теряться целиком.
         tts_audio = await loop.run_in_executor(robot_brain._speech_executor, robot_brain.tts.synthesize, response_text)
         if not tts_audio:
             logger.warning("TTS не вернул аудио — отправляем текстовый ответ без озвучки")
@@ -522,8 +503,6 @@ async def voice_input(
         if not user_text.strip():
             return JSONResponse({"status": "error", "message": "Пустой текст"})
 
-        # Тот же будильник "Сорен", что и в handle_command/_process_speech —
-        # /voice не должен быть обходным путём мимо активации по имени.
         command_text = strip_wake_word(user_text)
         if command_text is None:
             if robot_brain.is_wake_session_active():
@@ -538,14 +517,13 @@ async def voice_input(
 
         robot_brain.mark_dialog_active()
 
-        # Вопрос — в чат СРАЗУ после распознавания, не дожидаясь ответа
         user_chat_id = await chat_log.emit_async("user", command_text or user_text, source="pc")
 
         llm_result = await loop.run_in_executor(robot_brain._speech_executor, robot_brain.generate_reply, command_text)
         response_text = llm_result.get("text", "")
         action = llm_result.get("action")
         emotion = llm_result.get("emotion", "calm")
-        bot_chat_id = await chat_log.emit_async("bot", response_text, emotion=emotion, source="pc")  # до синтеза речи
+        bot_chat_id = await chat_log.emit_async("bot", response_text, emotion=emotion, source="pc")
 
         servo_angles = robot_brain.emotion_engine.get_servo_angles(emotion)
         eye_led = robot_brain.emotion_engine.get_eye_led(emotion)
@@ -633,13 +611,12 @@ async def websocket_endpoint(websocket: WebSocket):
 
     active_connections.add(websocket)
     if websocket not in device_connections:
-        panel_connections.add(websocket)  # по умолчанию считаем панелью, пока не докажет обратное
+        panel_connections.add(websocket)
 
     logger.info(f"Клиент подключен: {client_info}")
 
     try:
         if pending_first_message is not None:
-            # Уже прочитанное первое сообщение (ping от устройства) — обработать как обычно
             if "text" in pending_first_message:
                 await handle_text_message(websocket, pending_first_message["text"])
             elif "bytes" in pending_first_message:
@@ -664,15 +641,8 @@ async def websocket_endpoint(websocket: WebSocket):
         panel_wants_video.pop(websocket, None)
         _state_report_events.pop(websocket, None)
         if was_device:
-            behavior_engine.reset()  # состояние опоры неизвестно, пока плата не вернётся
-            # Плата отключилась (например, перезагружается) — сразу говорим
-            # панели "Offline", не дожидаясь, пока кто-то вручную обновит страницу.
+            behavior_engine.reset()
             await notify_panels_status_changed()
-            # Пункт 3 (SAFETY): если плата отвалилась посреди активной
-            # анимации/локомоции — серверное состояние is_animating иначе
-            # останется "залипшим" в True навсегда (отменить-то физически
-            # уже нечего, связи нет, но серверная модель должна знать, что
-            # текущее движение не завершилось штатно).
             if robot_brain and robot_brain.servos.is_animating:
                 await robot_brain.emergency_stop(reason="device_disconnected")
 
@@ -701,7 +671,6 @@ async def send_audio_to_device(websocket: WebSocket, audio_bytes: bytes, chunk_s
                 f"{target.client.host}:{target.client.port}")
     start_ts = asyncio.get_event_loop().time()
 
-    # ~43 мс на чанк; спим 30 мс, чтобы ESP32 успевал опустошать буфер
     chunk_audio_ms = (chunk_size / (48000 * 2)) * 1000
     sleep_ms = max(10, chunk_audio_ms * 0.7)
 
@@ -710,7 +679,6 @@ async def send_audio_to_device(websocket: WebSocket, audio_bytes: bytes, chunk_s
             chunk = audio_bytes[offset:offset + chunk_size]
             await asyncio.wait_for(target.send_bytes(b"AUDI" + chunk), timeout=5.0)
 
-            # Троттлинг + yield event loop (обработка входящих ping/pong)
             if idx < total_chunks - 1:
                 await asyncio.sleep(sleep_ms / 1000)
 
@@ -740,7 +708,6 @@ async def broadcast_servo_angles_to_devices(angles: List[int]):
         logger.debug("📡 [TX servo] broadcast skipped — no device connections")
         return
     servo_cmd = {"type": "servo_update", "angles": {str(i): a for i, a in enumerate(angles)}}
-    # DEBUG, а не INFO: кадр уходит на каждый тик анимации/слежения, на INFO он забивал терминал
     logger.debug(f"📡 [TX servo] broadcast → {len(device_connections)} device(s), angles: {angles}")
     dead = []
     for conn in list(device_connections):
@@ -866,7 +833,7 @@ async def _handle_new_device_connection(websocket: WebSocket):
         _state_report_events.pop(websocket, None)
 
     if websocket not in device_connections:
-        return  # устройство уже отключилось, пока мы ждали ответа
+        return
 
     await _glide_all_servos_to_default()
     await refresh_backlight(force=True)
@@ -984,9 +951,6 @@ async def dispatch_command_with_sfx(command: dict) -> dict:
     чтобы звук на локомоцию не зависел от того, кто именно её вызвал."""
     result = await robot_brain.handle_command(command)
 
-    # sfx/audio — это ПУТЬ к файлу кэша, и только у результатов движения (взлёт/посадка/ходьба).
-    # У ответа на текстовую команду "audio" — это сам PCM в hex для панели: его нельзя
-    # трактовать как путь (раньше в лог летел весь hex-дамп с «использую live TTS»).
     sfx_or_audio = (result.get("sfx") or result.get("audio")) if result.get("motion") else None
     if sfx_or_audio:
         pcm = robot_brain._load_cached_audio(sfx_or_audio)
@@ -1008,9 +972,6 @@ async def handle_text_message(websocket: WebSocket, text: str):
                         "set_control_mode", "get_control_mode"]:
             result = await dispatch_command_with_sfx(data)
 
-            # Текстовая команда из панели: ответ озвучен на сервере, но раньше PCM уходил ТОЛЬКО
-            # в JSON панели (hex), а на динамик робота не отправлялся вообще. Отправляем на плату
-            # (если выбран вывод «Робот») и не гоняем лишний hex в панель — она им не пользуется.
             if msg_type == "text":
                 audio_hex = result.pop("audio", "") if isinstance(result, dict) else ""
                 if audio_hex and result.get("status") == "ok":
@@ -1024,16 +985,11 @@ async def handle_text_message(websocket: WebSocket, text: str):
                             logger.warning("📡 [TX audio] плата не подключена — озвучка текстовой команды некому доставить")
 
             await websocket.send_json(result)
-            # Гарантированная отправка на ESP32 после ручного управления сервами из панели
             if msg_type in ("servo", "servo_multi"):
                 angles = robot_brain.servos.get_current_angles()
                 logger.info(f"📡 [TX servo] manual {msg_type} trigger → broadcasting angles: {angles}")
                 await broadcast_servo_state(angles)
         elif msg_type == "ping":
-            # ESP32 шлёт "ping" первым сообщением сразу после коннекта (см. .ino,
-            # WStype_CONNECTED) — панель мониторинга такое никогда не шлёт. Это уже
-            # существующий надёжный маркер устройства, используем его для явной
-            # идентификации, не дожидаясь первого бинарного AUDI/VIDE-пакета.
             is_new_device = websocket not in device_connections
             device_connections.add(websocket)
             panel_connections.discard(websocket)
@@ -1056,18 +1012,8 @@ async def handle_text_message(websocket: WebSocket, text: str):
                     asyncio.create_task(_handle_new_device_connection(websocket))
             await websocket.send_json({"type": "hello_ack", "client": client})
         elif msg_type == "sensor":
-            # Датчики опоры с платы: {"type":"sensor","paw":true,"wing":false}.
-            # paw — кнопка в лапе (стоит), wing — кнопка в крыле (держат).
             behavior_engine.on_sensor(bool(data.get("paw")), bool(data.get("wing")))
         elif msg_type == "device_state":
-            # Обратная связь от платы: её РЕАЛЬНОЕ текущее состояние (серво +
-            # подсветка), присылается в ответ на request_state (см.
-            # _handle_new_device_connection) — а также, если прошивка захочет,
-            # проактивно в любой момент (например, если состояние поменялось
-            # локально на плате — кнопкой на корпусе и т.п.).
-            # Ожидаемый формат: {"type":"device_state",
-            #                     "angles": {"0":90, "1":87, ...} | [90,87,...],
-            #                     "backlight": true|false}
             raw_angles = data.get("angles")
             if raw_angles:
                 angles_list = robot_brain.servos.get_current_angles()
@@ -1083,8 +1029,6 @@ async def handle_text_message(websocket: WebSocket, text: str):
                     angles_list = [int(a) for a in raw_angles]
                 robot_brain.servos.apply_device_state(angles_list)
 
-            # Кнопки опоры в снимке состояния (после (пере)подключения) — принимаем
-            # как начальное состояние, без событий
             if "paw" in data and "wing" in data:
                 behavior_engine.on_sensor(bool(data.get("paw")), bool(data.get("wing")), initial=True)
 
@@ -1096,8 +1040,6 @@ async def handle_text_message(websocket: WebSocket, text: str):
             if event is not None:
                 event.set()
         elif msg_type == "video_pref":
-            # Панель сообщает, хочет ли она получать видео (чекбокс "Показывать видео").
-            # Не влияет на детекцию/трекинг — только на то, кому реально рассылается кадр.
             panel_wants_video[websocket] = bool(data.get("enabled", True))
         elif msg_type == "audio_mode":
             await websocket.send_json({
@@ -1154,8 +1096,6 @@ async def _maybe_broadcast_panel_frame():
 
 async def handle_binary_message(websocket: WebSocket, data: bytes):
     try:
-        # Только ESP32 шлёт бинарные AUDI/VIDE/VIDP пакеты — переклассифицируем соединение
-        # (запасной вариант; основная идентификация по "ping", см. handle_text_message)
         if websocket not in device_connections:
             device_connections.add(websocket)
             panel_connections.discard(websocket)
@@ -1190,9 +1130,6 @@ async def handle_binary_message(websocket: WebSocket, data: bytes):
             await _maybe_broadcast_panel_frame()
 
         elif data_type == "VIDP":
-            # Кадр повышенного качества ТОЛЬКО для панели мониторинга (реже, крупнее) —
-            # детекцию/трекинг/серво НЕ запускает. Если прошивка не обновлена и этот
-            # тег никогда не приходит — ничего не меняется, работает как раньше на VIDE.
             ok = await robot_brain.update_panel_frame(payload)
             if ok:
                 await _maybe_broadcast_panel_frame()
@@ -1205,7 +1142,6 @@ async def _send_servo_update(websocket: WebSocket, vision_result: dict):
     """Шлёт servo_update на ESP32: не чаще SERVO_UPDATE_MIN_INTERVAL_SEC и только
     ИЗМЕНИВШИЕСЯ углы (delta) — интерполяция на прошивке и так плавно доедет между
     редкими целями, полный массив на каждый кадр не нужен."""
-    # FIX: не пытаться отправить в соединение, которое уже мёртво
     if websocket not in device_connections:
         return
     servo_angles = vision_result["servo_angles"]
@@ -1217,13 +1153,11 @@ async def _send_servo_update(websocket: WebSocket, vision_result: dict):
         return
 
     if last_sent_angles is None:
-        # Первая отправка этому устройству — шлём всё, дальше только дельты
         delta = {str(i): a for i, a in enumerate(servo_angles)}
     else:
         delta = {str(i): a for i, a in enumerate(servo_angles) if a != last_sent_angles[i]}
 
     if not delta:
-        # Ничего не изменилось — не спамим сеть, но время последней проверки обновляем
         _last_servo_send[websocket] = (now, last_sent_angles)
         logger.debug(f"📡 [TX servo] no delta to {websocket.client.host}:{websocket.client.port}")
         return
@@ -1302,6 +1236,9 @@ LOGIN_HTML = """
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Soren — Вход</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="alternate icon" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/panel-assets/apple-touch-icon.png">
 <style>
   :root{
     --bg:#0b0d0b; --bg2:#0f130f; --panel:rgba(26,31,26,0.6); --border:rgba(255,255,255,0.09);
@@ -1377,27 +1314,30 @@ PANEL_HTML = """
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Сорен · Панель управления</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="alternate icon" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/panel-assets/apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,380;9..144,520;9..144,600&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   :root{
     /* ---- палитра (5 цветов, из окраса сипухи) ---- */
-    --beige:        #F3EEE4;   /* светлый тёплый бежевый — панели, виньетка */
-    --ash:          #A8A29A;   /* пепельно-серый — вторичный текст, неактив */
-    --cream:        #FBF9F4;   /* кремово-белый — светлый текст на тёмном */
-    --amber:        #B8875A;   /* приглушённый янтарь — акцент */
-    --amber-2:      #C99968;   /* второй тон акцента, для градиента */
-    --graphite:     #38332E;   /* графитовый — основной текст */
+    --beige:        #F3EEE4;
+    --ash:          #A8A29A;
+    --cream:        #FBF9F4;
+    --amber:        #B8875A;
+    --amber-2:      #C99968;
+    --graphite:     #38332E;
     --beige-rgb:    243,238,228;
     --cream-rgb:    251,249,244;
     --graphite-rgb: 56,51,46;
     --amber-rgb:    184,135,90;
 
-    --text: var(--graphite);      /* основной текст — меняется в тёмной теме */
-    --vignette-rgb: var(--beige-rgb); /* цвет виньетки поверх фото — меняется в тёмной теме */
-    --line-rgb: var(--graphite-rgb);  /* бордеры/разделители/hover — меняется в тёмной теме */
-    --surface-rgb: var(--cream-rgb);  /* подложки карточек/чата/полей — меняется в тёмной теме */
+    --text: var(--graphite);
+    --vignette-rgb: var(--beige-rgb);
+    --line-rgb: var(--graphite-rgb);
+    --surface-rgb: var(--cream-rgb);
 
     --glass-fill:     rgba(var(--cream-rgb),0.66);
     --glass-fill-top: rgba(var(--cream-rgb),0.46);
@@ -1411,16 +1351,14 @@ PANEL_HTML = """
     --ease-spring: cubic-bezier(.22,1.12,.36,1);
   }
 
-  /* ==================== ТЁМНАЯ ТЕМА ====================
-     Не инверсия светлой — отдельный тёплый графит (в тон тёмных перьев
-     сипухи), а не нейтральный "айтишный" чёрный. */
-  [data-theme="dark"]{
-    --text: var(--cream);              /* весь текст — кремово-белый */
-    --vignette-rgb: 30,27,24;          /* виньетка — тёплый тёмный графит, не бежевый */
-    --line-rgb: var(--cream-rgb);      /* бордеры/разделители/hover — светлые на тёмном */
-    --surface-rgb: 78,71,63;           /* подложки карточек/чата/полей — теплее и светлее фона панели */
 
-    --amber:   #D9995F;                /* акцент чуть ярче — гаснет на тёмном иначе */
+  [data-theme="dark"]{
+    --text: var(--cream);
+    --vignette-rgb: 30,27,24;
+    --line-rgb: var(--cream-rgb);
+    --surface-rgb: 78,71,63;
+
+    --amber:   #D9995F;
     --amber-2: #E8B37E;
 
     --glass-fill:     rgba(45,41,37,0.50);
@@ -1449,7 +1387,7 @@ PANEL_HTML = """
     background-position:center;
     z-index:-3;
   }
-  /* лёгкий шум по всей сцене — убирает "пластиковый" плоский вид */
+
   .bg-noise{
     position:fixed; inset:0;
     z-index:-1;
@@ -1458,8 +1396,7 @@ PANEL_HTML = """
     pointer-events:none;
     background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   }
-  /* бежевая виньетка поверх фото: заблюрена и укрыта бежевым — КРОМЕ зоны совы,
-     там прозрачно, чтобы фон был виден чётко под самой совой */
+
   .bg-vignette{
     position:fixed; inset:0;
     z-index:-2;
@@ -1532,7 +1469,7 @@ PANEL_HTML = """
     transition:transform .18s var(--ease-spring), box-shadow .18s;
   }
   .day-night-toggle:hover{ transform:translateY(-1px); box-shadow:0 1px 0 rgba(255,255,255,.5) inset, 0 5px 14px -4px rgba(var(--graphite-rgb),.5); }
-  .day-night-toggle:active .dn-knob{ width:26px; } /* лёгкое "сжатие" при клике, как у стеклянных кнопок */
+  .day-night-toggle:active .dn-knob{ width:26px; }
 
   .dn-layer{ position:absolute; inset:0; transition:opacity .6s ease; }
   .dn-sky-day{ background:linear-gradient(180deg,#bce4fb 0%,#eef8ff 78%); opacity:1; }
@@ -1586,7 +1523,7 @@ PANEL_HTML = """
     align-items:flex-end;
     justify-content:center;
     min-height:0;
-    transform:translateY(22px); /* съедает нижний padding .app — сова касается края экрана */
+    transform:translateY(22px);
   }
   .owl-col img{
     max-height:calc(96% + 22px);
@@ -1665,7 +1602,7 @@ PANEL_HTML = """
   .collapse-btn svg{ transition:transform .32s var(--ease-spring); }
   .panel.collapsed .collapse-btn svg{ transform:rotate(180deg); }
 
-  /* tabs */
+
   .tabs{
     display:flex;
     gap:4px;
@@ -1729,7 +1666,7 @@ PANEL_HTML = """
   .label-sm{ font-size:11.5px; color:var(--text); opacity:.6; }
   .value-lg{ font-family:'Fraunces', serif; font-size:20px; font-weight:520; margin-top:2px; }
 
-  /* toggle switch */
+
   .switch{ position:relative; width:38px; height:22px; flex:0 0 auto; }
   .switch input{ opacity:0; width:0; height:0; }
   .switch .track{
@@ -1753,7 +1690,7 @@ PANEL_HTML = """
   .switch input:checked + .track::after{ transform:translateX(16px); }
   .switch input:disabled + .track{ opacity:.45; cursor:not-allowed; }
 
-  /* range slider (servos) */
+
   input[type=range]{
     -webkit-appearance:none; appearance:none;
     width:100%; height:4px; border-radius:3px;
@@ -1769,7 +1706,7 @@ PANEL_HTML = """
     box-shadow:0 2px 6px rgba(var(--graphite-rgb),.25);
   }
 
-  /* chat */
+
   .chat-log{ display:flex; flex-direction:column; gap:10px; margin-bottom:12px; min-height:120px; }
   .chat-empty{
     flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center;
@@ -1802,7 +1739,7 @@ PANEL_HTML = """
   .send-btn:hover{ transform:translateY(-1px); }
   .send-btn:active{ transform:translateY(0) scale(.97); box-shadow:0 1px 4px -1px rgba(var(--amber-rgb),.6) inset; }
 
-  /* camera */
+
   .camera-frame{
     position:relative; border-radius:16px; overflow:hidden;
     width:100%; height:230px;
@@ -1820,17 +1757,14 @@ PANEL_HTML = """
   }
   .live-badge::before{ content:''; width:5px; height:5px; border-radius:50%; background:var(--cream); }
 
-  /* servo grid */
+
   .servo-grid{ display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
   .servo-card{ background:rgba(var(--surface-rgb),.4); border:1px solid rgba(var(--surface-rgb),.5); border-radius:12px; padding:6px 10px; }
   .servo-card .row-between{ margin-bottom:4px; }
   .servo-card .ch{ font-family:'IBM Plex Mono'; font-size:10.5px; opacity:.55; }
   .servo-card .deg{ font-size:12px; font-weight:600; }
 
-  /* log list */
-  .log-list{ display:flex; flex-direction:column; gap:8px; }
-  .log-item{ display:flex; gap:10px; font-size:12.5px; padding:8px 0; border-bottom:1px solid rgba(var(--line-rgb),0.07); }
-  .log-item .t{ font-family:'IBM Plex Mono'; font-size:10.5px; opacity:.5; flex:0 0 52px; padding-top:1px; }
+
 
   select.select-line{
     width:100%; padding:9px 30px 9px 11px; border-radius:10px;
@@ -1851,7 +1785,7 @@ PANEL_HTML = """
 
   .hint-text{ font-size:11.5px; color:var(--text); opacity:.55; line-height:1.5; margin:12px 2px 0; }
 
-  /* mic button + voice visualizer */
+
   .mic-btn{
     width:38px; height:38px; flex:0 0 auto; border-radius:12px;
     border:1px solid rgba(var(--line-rgb),0.14);
@@ -1871,7 +1805,7 @@ PANEL_HTML = """
   @keyframes micPulse{ 0%,100%{ box-shadow:0 0 0 0 rgba(var(--amber-rgb),.4);} 50%{ box-shadow:0 0 0 8px rgba(var(--amber-rgb),0);} }
   .audio-visualizer{ width:100%; height:34px; margin-bottom:10px; border-radius:10px; background:rgba(var(--surface-rgb),.35); }
 
-  /* chat quick-action chips */
+
   .chip-row{ display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
   .chip-btn{
     border:1px solid rgba(var(--line-rgb),0.14);
@@ -1886,7 +1820,7 @@ PANEL_HTML = """
   .chip-btn.chip-danger{ color:#B2504A; border-color:rgba(178,80,74,.3); }
   .chip-btn.chip-danger:hover{ border-color:#B2504A; }
 
-  /* gamepad scheme */
+
   .gamepad-scheme{ display:flex; flex-direction:column; gap:14px; margin-top:4px; }
   .gp-sticks{ display:flex; gap:18px; justify-content:center; }
   .gp-stick{ text-align:center; }
@@ -1916,10 +1850,19 @@ PANEL_HTML = """
   .gp-btn.active{
     border-color:var(--amber); background:rgba(var(--amber-rgb),.15); color:var(--amber);
   }
+  .gp-shoulders{ grid-template-columns:repeat(2,1fr); }
+  .gp-face{ grid-template-columns:repeat(4,1fr); }
+  .gp-face .gp-btn-name{ font-size:17px; }
+  .gp-triggers{ display:grid; grid-template-columns:repeat(2,1fr); gap:10px; }
+  .gp-trig{ display:grid; grid-template-columns:auto 1fr auto; align-items:center; gap:8px; font-size:12px; }
+  .gp-trig-name{ font-weight:700; letter-spacing:.04em; }
+  .gp-trig-bar{ height:8px; border-radius:6px; overflow:hidden; background:rgba(var(--surface-rgb),.45); border:1px solid rgba(var(--line-rgb),.14); }
+  .gp-trig-fill{ height:100%; width:0; background:linear-gradient(90deg,var(--amber-2),var(--amber)); transition:width .06s linear; }
+  .gp-trig-val{ font-family:'IBM Plex Mono'; font-size:10.5px; opacity:.6; min-width:32px; text-align:right; }
   .gp-btn-name{ font-size:13px; font-weight:700; letter-spacing:.04em; }
   .gp-btn-role{ font-size:10px; opacity:.6; }
 
-  /* camera badges */
+
   .cam-badges{ display:flex; flex-wrap:wrap; gap:8px; justify-content:center; margin-top:14px; }
   .cam-badge{
     display:flex; align-items:center; gap:7px;
@@ -1934,7 +1877,7 @@ PANEL_HTML = """
   .cam-badge.on{ opacity:1; color:var(--amber); border-color:rgba(var(--amber-rgb),.4); }
   #cameraPlaceholder{ font-size:12px; color:var(--cream); opacity:.5; text-align:center; padding:0 20px; }
 
-  /* AI core segmented local/cloud */
+
   .ai-core-card{ display:grid; grid-template-columns:repeat(3,1fr); gap:0; padding:0; overflow:hidden; }
   .ai-core-col{ padding:9px 14px; }
   .ai-core-col + .ai-core-col{ border-left:1px solid rgba(var(--line-rgb),0.12); }
@@ -1978,19 +1921,9 @@ PANEL_HTML = """
     <header>
       <div class="logo">
         <span class="mark">
-          <svg width="26" height="26" viewBox="0 0 32 32" fill="none">
-            <path d="M9.5 7.5 12 13 7 12.2Z" fill="currentColor"/>
-            <path d="M22.5 7.5 20 13 25 12.2Z" fill="currentColor"/>
-            <path d="M16 7C10 7 5.5 12.2 5.5 18.6 5.5 25.2 10.2 29.5 16 29.5S26.5 25.2 26.5 18.6C26.5 12.2 22 7 16 7Z" fill="currentColor" opacity=".1"/>
-            <path d="M16 7C10 7 5.5 12.2 5.5 18.6 5.5 25.2 10.2 29.5 16 29.5S26.5 25.2 26.5 18.6C26.5 12.2 22 7 16 7Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
-            <circle cx="11.9" cy="18.3" r="4" fill="currentColor" opacity=".1"/>
-            <circle cx="20.1" cy="18.3" r="4" fill="currentColor" opacity=".1"/>
-            <circle cx="11.9" cy="18.3" r="4" stroke="currentColor" stroke-width="1.4"/>
-            <circle cx="20.1" cy="18.3" r="4" stroke="currentColor" stroke-width="1.4"/>
-            <circle cx="11.9" cy="18.3" r="1.3" fill="currentColor"/>
-            <circle cx="20.1" cy="18.3" r="1.3" fill="currentColor"/>
-            <path d="M16 20.6 14.3 23.4h3.4Z" fill="currentColor"/>
-          </svg>
+          <svg width="26" height="26" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><g transform="translate(16 16) rotate(40)"><path d="M0-15.5C5.6-12.6 8-6.4 7-.6 6.6 2.2 5.2 4.6 3 6.2L1.2 5.2 0 6.6-1.4 5.2-3.6 6.6C-6.4 4.6-8 1-7.6-3.6-7.2-8.6-4.4-12.8 0-15.5Z" stroke-width="1.5" fill="currentColor" fill-opacity=".14"/>
+            <path d="M0-15.5V15.5" stroke-width="1.7"/>
+            <path d="M0 4C-2.6 3.4-4.6 1.6-5.6-1M0 0C-2.8-.6-5-2.6-6.2-5.4M0-4C-2.6-4.6-4.4-6.4-5.2-8.8M0-8C-1.8-8.6-3-10-3.4-11.6M0 4C2.6 3.4 4.6 1.6 5.6-1M0 0C2.8-.6 5-2.6 6.2-5.4M0-4C2.6-4.6 4.4-6.4 5.2-8.8M0-8C1.8-8.6 3-10 3.4-11.6" stroke-width="1" opacity=".7"/></g></svg>
         </span>
         Сорен
       </div>
@@ -2053,12 +1986,9 @@ PANEL_HTML = """
             <div class="tab-pane active" data-pane="chat">
               <div class="chat-log" id="chatHistory">
                 <div class="chat-empty" id="chatEmpty">
-                  <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.4">
-                    <path d="M16 7C10 7 5.5 12.2 5.5 18.6 5.5 25.2 10.2 29.5 16 29.5S26.5 25.2 26.5 18.6C26.5 12.2 22 7 16 7Z"/>
-                    <circle cx="11.9" cy="18.3" r="3.4"/><circle cx="20.1" cy="18.3" r="3.4"/>
-                    <circle cx="11.9" cy="18.3" r="1" fill="currentColor" stroke="none"/>
-                    <circle cx="20.1" cy="18.3" r="1" fill="currentColor" stroke="none"/>
-                  </svg>
+                  <svg width="34" height="34" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><g transform="translate(16 16) rotate(40)"><path d="M0-15.5C5.6-12.6 8-6.4 7-.6 6.6 2.2 5.2 4.6 3 6.2L1.2 5.2 0 6.6-1.4 5.2-3.6 6.6C-6.4 4.6-8 1-7.6-3.6-7.2-8.6-4.4-12.8 0-15.5Z" stroke-width="1.5" fill="currentColor" fill-opacity=".14"/>
+            <path d="M0-15.5V15.5" stroke-width="1.7"/>
+            <path d="M0 4C-2.6 3.4-4.6 1.6-5.6-1M0 0C-2.8-.6-5-2.6-6.2-5.4M0-4C-2.6-4.6-4.4-6.4-5.2-8.8M0-8C-1.8-8.6-3-10-3.4-11.6M0 4C2.6 3.4 4.6 1.6 5.6-1M0 0C2.8-.6 5-2.6 6.2-5.4M0-4C2.6-4.6 4.4-6.4 5.2-8.8M0-8C1.8-8.6 3-10 3.4-11.6" stroke-width="1" opacity=".7"/></g></svg>
                   <span>Пока тихо. Напишите или скажите что-нибудь Сорену — он слушает.</span>
                 </div>
               </div>
@@ -2126,14 +2056,8 @@ PANEL_HTML = """
               </div>
               <p class="hint-text" id="controlModeHint">Ручное: геймпад и кнопки ниже. Автономное: геймпад отключён (голос/ИИ смогут переключать режим).</p>
               <div class="chip-row" style="margin-bottom:12px;">
-                <button class="chip-btn" onclick="sendCmd({type:'walk',distance_cm:10,source:'panel'})">Шаг +10см</button>
-                <button class="chip-btn" onclick="sendCmd({type:'walk',distance_cm:-10,source:'panel'})">Шаг −10см</button>
-                <button class="chip-btn" onclick="sendCmd({type:'turn',angle_deg:-15,source:'panel'})">← 15°</button>
-                <button class="chip-btn" onclick="sendCmd({type:'turn',angle_deg:15,source:'panel'})">15° →</button>
-                <button class="chip-btn" onclick="sendCmd({type:'fly',distance_cm:30,source:'panel'})">Лет +30см</button>
-                <button class="chip-btn" onclick="sendCmd({type:'takeoff',source:'panel'})">Взлёт</button>
-                <button class="chip-btn" onclick="sendCmd({type:'land',source:'panel'})">Посадка</button>
-                <button class="chip-btn chip-danger" onclick="sendCmd({type:'emergency_stop',reason:'panel'})">STOP</button>
+                <button class="chip-btn" onclick="sendCmd({type:'walk',steps:2,source:'panel'})">2 шага вперёд</button>
+                <button class="chip-btn" onclick="sendCmd({type:'fly',distance_cm:500,source:'panel'})">Пролететь 5 м</button>
               </div>
               <div class="mini-card" id="gamepadCard">
                 <div class="row-between" style="margin-bottom:8px;">
@@ -2153,13 +2077,19 @@ PANEL_HTML = """
                       <div class="gp-stick-meta" id="stickRMeta">RX/RY — резерв</div>
                     </div>
                   </div>
-                  <div class="gp-buttons" id="gpButtons">
-                    <div class="gp-btn" data-btn="A"><span class="gp-btn-name">A</span><span class="gp-btn-role">Взлёт</span></div>
-                    <div class="gp-btn" data-btn="B"><span class="gp-btn-name">B</span><span class="gp-btn-role">Посадка</span></div>
-                    <div class="gp-btn" data-btn="X"><span class="gp-btn-name">X</span><span class="gp-btn-role">—</span></div>
-                    <div class="gp-btn" data-btn="Y"><span class="gp-btn-name">Y</span><span class="gp-btn-role">—</span></div>
-                    <div class="gp-btn" data-btn="LB"><span class="gp-btn-name">LB</span><span class="gp-btn-role">—</span></div>
-                    <div class="gp-btn" data-btn="RB"><span class="gp-btn-name">RB</span><span class="gp-btn-role">—</span></div>
+                  <div class="gp-triggers">
+                    <div class="gp-trig" data-trig="l2"><span class="gp-trig-name">L2</span><div class="gp-trig-bar"><div class="gp-trig-fill"></div></div><span class="gp-trig-val">0%</span></div>
+                    <div class="gp-trig" data-trig="r2"><span class="gp-trig-name">R2</span><div class="gp-trig-bar"><div class="gp-trig-fill"></div></div><span class="gp-trig-val">0%</span></div>
+                  </div>
+                  <div class="gp-buttons gp-shoulders">
+                    <div class="gp-btn" data-btn="L1"><span class="gp-btn-name">L1</span><span class="gp-btn-role">—</span></div>
+                    <div class="gp-btn" data-btn="R1"><span class="gp-btn-name">R1</span><span class="gp-btn-role">—</span></div>
+                  </div>
+                  <div class="gp-buttons gp-face" id="gpButtons">
+                    <div class="gp-btn" data-btn="TRIANGLE"><span class="gp-btn-name">△</span><span class="gp-btn-role">—</span></div>
+                    <div class="gp-btn" data-btn="SQUARE"><span class="gp-btn-name">□</span><span class="gp-btn-role">—</span></div>
+                    <div class="gp-btn" data-btn="CIRCLE"><span class="gp-btn-name">○</span><span class="gp-btn-role">Посадка</span></div>
+                    <div class="gp-btn" data-btn="CROSS"><span class="gp-btn-name">✕</span><span class="gp-btn-role">Взлёт</span></div>
                   </div>
                 </div>
               </div>
@@ -2203,7 +2133,6 @@ PANEL_HTML = """
             <button class="tab active" data-tab="model">Модель ИИ</button>
             <button class="tab" data-tab="memory">Память</button>
             <button class="tab" data-tab="audio">Вывод звука</button>
-            <button class="tab" data-tab="logs">Журнал</button>
           </div>
           <div class="panel-body">
 
@@ -2267,10 +2196,6 @@ PANEL_HTML = """
               </div>
             </div>
 
-            <div class="tab-pane" data-pane="logs">
-              <div class="log-list" id="logList"></div>
-            </div>
-
           </div>
         </section>
 
@@ -2282,13 +2207,6 @@ PANEL_HTML = """
 
 <script>
   // ==================== ТЕМА: авто (по часам устройства) + ручной day/night ====================
-  // По умолчанию — режим "авто": ночная тема с 20:00 до 7:00 по локальному
-  // времени устройства (без геолокации — запрос разрешения на каждой
-  // перезагрузке раздражает, а часы устройства всегда доступны сразу).
-  // Кнопка в шапке даёт только явный выбор "день"/"ночь": один клик один раз
-  // переключает с текущего эффективного состояния на противоположное и
-  // дальше держит его вручную, до перезагрузки страницы — обратно в "авто"
-  // кнопка не возвращает.
   const NIGHT_START_HOUR = 20;
   const NIGHT_END_HOUR = 7;
 
@@ -2309,7 +2227,6 @@ PANEL_HTML = """
   }
 
   function toggleTheme(){
-    // Ручной выбор — только день/ночь; к "авто" кнопка больше не возвращает.
     const current = themeMode === 'auto' ? (isNightNow() ? 'dark' : 'light') : themeMode;
     themeMode = current === 'dark' ? 'light' : 'dark';
     applyTheme();
@@ -2351,8 +2268,6 @@ PANEL_HTML = """
   let animationsList = [];
   let backlightState = { auto: false, manual: false, effective: false };
 
-  // "Connection open/closed" — собственный WS-канал этой панели.
-  // "Online/Offline" — подключено ли к серверу само устройство (ESP32).
   function setConnection(open){
     const el = document.getElementById('connectionIndicator');
     document.getElementById('connectionLabel').textContent = open ? 'Connection open' : 'Connection closed';
@@ -2385,13 +2300,10 @@ PANEL_HTML = """
     const data = JSON.parse(event.data);
     if (data.type === 'video_frame') {
       handleVideoFrame(data);
-      return; // не спамим журнал каждым кадром
+      return;
     }
     log('← ' + JSON.stringify(data));
     if (data.type === 'device_status_changed') {
-      // Плата (пере)подключилась или отключилась (например, перезагрузка робота) —
-      // сервер уже привёл сервы/подсветку в актуальное состояние на своей стороне,
-      // просто перечитываем /status тем же путём, что и при открытии панели.
       fetchStatus();
       return;
     }
@@ -2407,7 +2319,6 @@ PANEL_HTML = """
     }
     if (data.type === 'ai_mode' && data.modes) { aiModes = data.modes; updateAIModeUI(); }
     // Ответ на {type:'text'} при audioOutputMode==='robot' — без поля type,
-    // только status/response.
     if (data.type === 'chat_message') {
       addMessage(data.role, data.text, data.emotion, data.id, data.source);
       return;
@@ -2476,7 +2387,7 @@ PANEL_HTML = """
     const moveKnob = (id, x, y) => {
       const el = document.getElementById(id);
       if (!el) return;
-      const r = 28; // px радиус хода
+      const r = 28;
       const nx = Math.max(-1, Math.min(1, x || 0));
       const ny = Math.max(-1, Math.min(1, y || 0));
       el.style.transform = `translate(calc(-50% + ${nx * r}px), calc(-50% + ${ny * r}px))`;
@@ -2491,6 +2402,14 @@ PANEL_HTML = """
     if (metaR && axes.rx && axes.ry){
       metaR.textContent = `RX ${axes.rx.value.toFixed(2)} · RY ${axes.ry.value.toFixed(2)} — ${axes.rx.purpose} / ${axes.ry.purpose}`;
     }
+    const triggers = data.triggers || {};
+    document.querySelectorAll('.gp-trig').forEach(el => {
+      const info = triggers[el.getAttribute('data-trig')];
+      if (!info) return;
+      const pct = Math.round(info.value * 100);
+      el.querySelector('.gp-trig-fill').style.width = pct + '%';
+      el.querySelector('.gp-trig-val').textContent = pct + '%';
+    });
     const buttons = data.buttons || {};
     document.querySelectorAll('.gp-btn').forEach(el => {
       const name = el.getAttribute('data-btn');
@@ -2502,22 +2421,9 @@ PANEL_HTML = """
     });
   }
 
-  function log(msg){
-    const el = document.getElementById('logList');
-    if (!el) return;
-    const row = document.createElement('div');
-    row.className = 'log-item';
-    row.innerHTML = `<span class="t">${new Date().toLocaleTimeString()}</span><span>${msg.length > 220 ? msg.slice(0,220)+'…' : msg}</span>`;
-    el.appendChild(row);
-    while (el.children.length > 200) el.removeChild(el.firstChild); // не даём журналу расти бесконечно
-    el.scrollTop = el.scrollHeight;
-  }
+  function log(msg){ console.log(msg); }
 
   // ==================== ЧАТ ====================
-  // Единый чат: реплики приходят событиями chat_message от сервера (голос с робота,
-  // голос с ПК, текст из любой панели), поэтому диалог виден независимо от источника.
-  // seenChatIds защищает от дублей: свою реплику панель рисует сразу, а затем то же
-  // сообщение возвращается событием с тем же id и пропускается.
   const seenChatIds = new Set();
   const CHAT_SRC_LABEL = {robot:'🦉 робот', pc:'🎤 микрофон ПК', panel:'⌨ панель'};
   function newChatId(){
@@ -2552,7 +2458,7 @@ PANEL_HTML = """
       if (data.status === 'ok' && Array.isArray(data.messages)) {
         data.messages.forEach(m => addMessage(m.role, m.text, m.emotion, m.id, m.source));
       }
-    } catch(e) { /* истории может не быть при старте сервера — не критично */ }
+    } catch(e) {}
   }
 
   async function sendChat(){
@@ -2561,7 +2467,7 @@ PANEL_HTML = """
     if (!text) return;
     input.value = '';
     const cid = newChatId();
-    addMessage('user', text, null, cid, 'panel');   // мгновенно; сервер вернёт то же сообщение с тем же id
+    addMessage('user', text, null, cid, 'panel');
     if (audioOutputMode === 'robot') sendCmd({type:'text', text, client_id: cid});
     else await sendLocal(text, cid);
   }
@@ -2658,8 +2564,6 @@ PANEL_HTML = """
       const r = await fetch('/voice', {method:'POST', body:fd});
       const data = await r.json();
       if (data.status === 'ok') {
-        // Вопрос и ответ уже пришли событиями chat_message (вопрос — сразу после распознавания);
-        // эти вызовы — страховка на случай, если WebSocket панели недоступен (дубли отсекает id)
         addMessage('user', data.user_text, null, data.user_chat_id, 'pc');
         addMessage('bot', data.response, data.emotion, data.bot_chat_id, 'pc');
         if (audioOutputMode === 'local' && data.audio_base64) playAudio(data.audio_base64);
@@ -2989,9 +2893,6 @@ PANEL_HTML = """
     `;
     return div;
   }
-  // Троттлинг на слайдер: угол шлётся сразу, но не чаще раза в SERVO_SLIDER_THROTTLE_MS —
-  // иначе перетаскивание ползунка заваливает сокет очередью устаревших команд.
-  // Финальное значение при отпускании досылается гарантированно отдельным таймером.
   const SERVO_SLIDER_THROTTLE_MS = 60;
   const _servoSlideState = {};
   function onServoSlide(i, value){

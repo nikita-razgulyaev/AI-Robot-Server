@@ -41,14 +41,13 @@ logger = logging.getLogger(__name__)
 
 
 class SupportState(str, Enum):
-    UNKNOWN = "unknown"        # данных от кнопок ещё нет (плата не подключена/старая прошивка)
-    STANDING = "standing"      # кнопка лапы нажата, крыла нет — стоит на опоре
-    HELD = "held"              # кнопка крыла нажата, лапы нет — держат в руках на весу
-    HELD_TOUCH = "held_touch"  # нажаты обе — держат, но лапа касается опоры (ставят/берут)
-    NONE = "none"              # не нажата ни одна — опоры нет (полёт/прыжок/падение)
+    UNKNOWN = "unknown"
+    STANDING = "standing"
+    HELD = "held"
+    HELD_TOUCH = "held_touch"
+    NONE = "none"
 
 
-# Допустимые события. Список совпадает с docs/BEHAVIOR.md
 EVENTS = ("support_lost", "support_regained", "grabbed", "released", "touchdown")
 
 _STATE_NAMES = {s.value for s in SupportState}
@@ -71,21 +70,21 @@ def derive_event(prev: SupportState, new: SupportState) -> Optional[str]:
 
     if new is SupportState.NONE:
         if prev is SupportState.STANDING:
-            return "support_lost"       # стоял -> опоры нет
-        return "released"               # держали (HELD/HELD_TOUCH) -> отпустили в воздухе
+            return "support_lost"
+        return "released"
 
     if prev is SupportState.NONE:
         if new is SupportState.HELD:
-            return "grabbed"            # поймали в воздухе руками
-        return "touchdown"              # лапа коснулась (STANDING / HELD_TOUCH)
+            return "grabbed"
+        return "touchdown"
 
     if prev is SupportState.STANDING:
-        return "grabbed"                # взяли: STANDING -> HELD / HELD_TOUCH
+        return "grabbed"
 
     if new is SupportState.STANDING:
-        return "support_regained"       # поставили: HELD / HELD_TOUCH -> STANDING
+        return "support_regained"
 
-    return None                         # HELD <-> HELD_TOUCH: просто ставят/поднимают, события нет
+    return None
 
 
 # ---------- Правила ----------
@@ -204,7 +203,6 @@ class BehaviorEngine:
         self._cooldown_until: Dict[str, float] = {}
         self._warned_anims = set()
 
-        # Подключается снаружи (websocket_server.startup) — модуль не знает про сеть
         self._servos = None
         self._on_frame: Optional[Callable[[List[int]], Awaitable[None]]] = None
         self._get_emotion: Optional[Callable[[], str]] = None
@@ -283,7 +281,7 @@ class BehaviorEngine:
             self._cancel_pending()
             return
         if raw is self._pending_state:
-            return  # уже ждём подтверждения именно этого состояния
+            return
 
         self._cancel_pending()
         self._pending_state = raw
@@ -329,11 +327,10 @@ class BehaviorEngine:
                     logger.debug(f"[behavior] Правило «{rule['id']}» на кулдауне — пропуск")
                 else:
                     await self._apply(rule)
-                break  # первое подходящее правило побеждает (даже если оно на кулдауне)
+                break
         except Exception as e:
             logger.error(f"[behavior] Ошибка при обработке события {event}: {e}")
         finally:
-            # Касание, поимка руками или "поставили" означают конец собственного полёта
             if event in ("touchdown", "grabbed", "support_regained"):
                 self.end_self_flight()
 
@@ -367,10 +364,8 @@ class BehaviorEngine:
             asyncio.create_task(self._play_phrase(do["phrase"]))
 
         if frames and self._servos is not None:
-            # Арбитр уже дал право действовать — прерываем то, что играло раньше
             await self._servos.cancel_current()
             asyncio.create_task(self._servos.play_animation(anim, on_frame=self._on_frame))
 
 
-# Глобальный экземпляр — один на сервер, как arbiter и animation_book
 behavior_engine = BehaviorEngine()

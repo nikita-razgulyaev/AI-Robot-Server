@@ -61,5 +61,4 @@ class ControlMode:
         return {"control_mode": self.mode, "modes": list(VALID_MODES)}
 
 
-# Глобальный синглтон — импортируется геймпадом, панелью, robot_brain
 control_mode = ControlMode(initial="manual")

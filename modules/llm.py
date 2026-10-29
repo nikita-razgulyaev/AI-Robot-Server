@@ -183,11 +183,6 @@ class CloudLLMEngine:
             self.system_prompt = "Ты — Сорен, амбарная сова, Главный Страж. Отвечай мудро и сдержанно."
 
     def _load_rag(self):
-        # Грузим тяжёлые ресурсы (Qdrant, sentence-transformers энкодер, файл
-        # канона) только если уровень "rag" включён по умолчанию (обычно = not
-        # fast_mode). Если выключен, self.vector_rag/keyword_rag остаются None —
-        # _ensure_rag_loaded() поднимет их лениво, если уровень включат из
-        # панели уже во время работы сервера.
         if memory_flags.get_flags().get("rag", not FAST_MODE):
             self._ensure_rag_loaded()
         else:
@@ -389,11 +384,6 @@ class LocalLLMEngine:
             self.system_prompt = "Ты — Сорен, амбарная сова, Главный Страж. Отвечай мудро и сдержанно."
 
     def _load_rag(self):
-        # Грузим тяжёлые ресурсы (Qdrant, sentence-transformers энкодер, файл
-        # канона) только если уровень "rag" включён по умолчанию (обычно = not
-        # fast_mode). Если выключен, self.vector_rag/keyword_rag остаются None —
-        # _ensure_rag_loaded() поднимет их лениво, если уровень включат из
-        # панели уже во время работы сервера.
         if memory_flags.get_flags().get("rag", not FAST_MODE):
             self._ensure_rag_loaded()
         else:
@@ -575,11 +565,6 @@ class LLMEngine:
         self.local_engine = None
         self.cloud_engine = None
         self.memory = memory_manager
-        # Текущая выбранная модель (id из config.yaml llm.local_models/cloud_models).
-        # Если текущий путь/имя модели не совпадает ни с одним элементом
-        # куратированного списка (например, задан вручную в config.yaml),
-        # используем сам путь/имя как id — панель тогда просто не подсветит
-        # ни один пункт списка активным, но всё продолжит работать.
         self.local_model_id = self._find_local_model_id(str(LLM_MODEL_PATH) if LLM_MODEL_PATH else None)
         self.cloud_model_id = self._find_cloud_model_id(CLOUD_MODEL_NAME)
 
@@ -684,8 +669,6 @@ class LLMEngine:
 
         if self.mode == "cloud" and self.cloud_engine:
             result = self.cloud_engine.generate(user_message, vision_context, memory_context)
-            # Облако недоступно / ошибка API — сразу переключаемся на локальную
-            # модель, не отдавая пользователю сообщение об ошибке.
             if result.get("error"):
                 logger.warning(
                     f"☁️ Облачный LLM недоступен ({result.get('error')}) — "

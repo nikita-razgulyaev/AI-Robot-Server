@@ -42,7 +42,6 @@ _COLOR_TRACKING = (46, 204, 113)
 _COLOR_IDLE = (140, 140, 140)
 _COLOR_OTHER = (90, 90, 90)
 
-# FIX: панельный кадр считается "свежим" только в течение этого времени.
 PANEL_FRAME_MAX_AGE_SEC = 3.0
 
 
@@ -65,7 +64,7 @@ class VisionEngine:
                     logger.error(f"Ошибка загрузки YOLO: {e}")
             else:
                 logger.warning(f"YOLO модель не найдена: {YOLO_MODEL}")
-                logger.info("Скачай: python download_yolo.py")
+                logger.info("Скачай: python scripts/download_yolo.py")
 
         self._init_face_detector()
 
@@ -191,7 +190,6 @@ class VisionEngine:
             frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             if frame is None:
                 return False
-            # FIX: поворот 90° вправо (по запросу — камера установлена на боку)
             frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
             self._panel_frame = frame
             self._panel_frame_ts = time.time()
@@ -206,8 +204,6 @@ class VisionEngine:
         трек умер или ещё не выбран."""
         current = self.tracker.get_track(self.target_track_id) if self.target_track_id is not None else None
         if current is not None:
-            # Трек ещё в памяти FaceTracker — не переключаемся, чтобы не было
-            # резкого snap\'a при кратковременном пропадании на 1–2 кадра.
             return
 
         if tracks:
@@ -223,7 +219,6 @@ class VisionEngine:
             if frame is None:
                 return {"error": "Не удалось декодировать кадр"}
 
-            # FIX: поворот 90° вправо (камера установлена на боку)
             frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
 
             self.last_frame = frame
@@ -240,7 +235,6 @@ class VisionEngine:
                 "description": ""
             }
 
-            # 1. YOLO Detection (троттлится)
             now = time.time()
             if self.yolo is not None and (now - self._last_yolo_run_ts) >= YOLO_DETECTION_INTERVAL_SEC:
                 self._last_yolo_run_ts = now
@@ -267,7 +261,6 @@ class VisionEngine:
                     logger.error(f"Ошибка YOLO: {e}")
             result["objects"] = self._cached_objects
 
-            # 2. Детекция лиц + трекинг + выбор цели
             face_boxes = self._detect_faces(frame)
             tracks = self.tracker.update(face_boxes)
             self._select_target(tracks)
@@ -288,7 +281,6 @@ class VisionEngine:
                 self.face_position = None
                 self.face_bbox = None
 
-            # 3. Pose Tracking (троттлится)
             if self.pose is not None and (now - self._last_pose_run_ts) >= POSE_DETECTION_INTERVAL_SEC:
                 self._last_pose_run_ts = now
                 try:

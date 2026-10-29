@@ -8,10 +8,6 @@ from modules.animation_loader import animation_book
 
 logger = logging.getLogger(__name__)
 
-# Сколько первых программных индексов (0..) идут через плату PCA9685 №1;
-# остальные (FIRST_BOARD_CHANNELS..21) — через плату №2. См. README/схему
-# подключения — индексы 0-13 = конечности (крылья+лапы), 14-21 = хвост/
-# голова/клюв/таз.
 FIRST_BOARD_CHANNELS = 14
 
 
@@ -26,13 +22,9 @@ class ServoController:
         self._active_task: Optional[asyncio.Task] = None
         self.hardware_available = False
         self.emotion_poses: Dict[str, List[int]] = {}
-        # Объекты реального железа — создаются в enable_hardware(), используются
-        # в _send_to_hardware(). None пока железо не включено.
-        self._pca_servos = None      # список из 22 adafruit_motor.servo.Servo (обе платы PCA9685 подряд)
-        # Коллбэк для отправки кадров на ESP32 по сети (WebSocket)
+        self._pca_servos = None
         self.on_servo_frame: Optional[Callable[[List[int]], Awaitable[None]]] = None
 
-        # Загружаем позы из Soren_emotions.json
         self._load_emotion_poses()
 
         logger.info("ServoController инициализирован (режим эмуляции)")
@@ -69,7 +61,6 @@ class ServoController:
             loop = asyncio.get_running_loop()
             loop.create_task(self.on_servo_frame(self.current_angles.copy()))
         except RuntimeError:
-            # Нет запущенного event loop (тесты, импорт)
             pass
 
     def set_emotion_pose(self, emotion: str):
@@ -278,7 +269,6 @@ class ServoController:
             return
 
         self.is_animating = True
-        # Fallback: если внешний on_frame не передан, используем внутренний
         effective_on_frame = on_frame or self.on_servo_frame
 
         try:

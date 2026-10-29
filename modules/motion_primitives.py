@@ -37,7 +37,6 @@ STEP_LENGTH_CM = 5.0
 FLAP_ADVANCE_CM = 15.0
 TURN_STEP_DEG = 15.0
 
-# Имена каналов (для документации и patch по имени)
 CHANNEL_NAMES = {
     0: "L_WING_FLAP", 1: "L_WING_FOLD", 2: "L_WING_TILT",
     3: "R_WING_FLAP", 4: "R_WING_FOLD", 5: "R_WING_TILT",
@@ -100,23 +99,23 @@ def patch(
 # Правая:  CH02:60 → CH05:120 → CH02:120
 # Левая:   CH02:60 → CH02:90  → CH02:60
 SINGLE_STEP: List[Dict] = [
-    {"time": 0,   "servos": patch()},                                      # нейтраль
+    {"time": 0,   "servos": patch()},
     # --- правая нога ---
-    {"time": 150, "servos": patch({2: 60})},                               # CH02: 60
-    {"time": 300, "servos": patch({2: 60, 5: 120})},                       # CH05: 120
-    {"time": 450, "servos": patch({2: 120, 5: 120})},                      # CH02: 120
+    {"time": 150, "servos": patch({2: 60})},
+    {"time": 300, "servos": patch({2: 60, 5: 120})},
+    {"time": 450, "servos": patch({2: 120, 5: 120})},
     # --- левая нога ---
-    {"time": 600, "servos": patch({2: 60})},                               # CH02: 60
-    {"time": 750, "servos": patch({2: 90})},                               # CH02: 90
-    {"time": 900, "servos": patch({2: 60})},                               # CH02: 60
-    {"time": 1000, "servos": patch()},                                     # обратно в нейтраль
+    {"time": 600, "servos": patch({2: 60})},
+    {"time": 750, "servos": patch({2: 90})},
+    {"time": 900, "servos": patch({2: 60})},
+    {"time": 1000, "servos": patch()},
 ]
 
 # === TUNE: один взмах в полёте ===
 SINGLE_FLAP: List[Dict] = [
     {"time": 0,   "servos": patch()},
-    {"time": 200, "servos": patch({0: 50, 3: 50})},    # крылья вверх (L/R_WING_FLAP)
-    {"time": 400, "servos": patch({0: 130, 3: 130})},  # крылья вниз (рабочий ход)
+    {"time": 200, "servos": patch({0: 50, 3: 50})},
+    {"time": 400, "servos": patch({0: 130, 3: 130})},
     {"time": 600, "servos": patch()},
 ]
 
@@ -124,25 +123,25 @@ SINGLE_FLAP: List[Dict] = [
 # TURN_STEP_DEG ≈ насколько градусов корпуса даёт этот тик.
 SINGLE_TURN_TICK: List[Dict] = [
     {"time": 0,   "servos": patch()},
-    {"time": 200, "servos": patch({"TAIL_YAW": 110})},  # хвост в сторону (заглушка)
+    {"time": 200, "servos": patch({"TAIL_YAW": 110})},
     {"time": 400, "servos": patch()},
 ]
 
 # === TUNE: взлёт / посадка (одноразовые, не циклы) ===
 TAKEOFF: List[Dict] = [
     {"time": 0,   "servos": patch()},
-    {"time": 150, "servos": patch({7: 70, 11: 70})},           # присед (L/R_LEG_HIP)
-    {"time": 300, "servos": patch({7: 110, 11: 110, 0: 50, 3: 50})},  # толчок + старт взмахов
-    {"time": 450, "servos": patch({7: 90, 11: 90, 0: 130, 3: 130})},  # лапы поджаты, взмах
+    {"time": 150, "servos": patch({7: 70, 11: 70})},
+    {"time": 300, "servos": patch({7: 110, 11: 110, 0: 50, 3: 50})},
+    {"time": 450, "servos": patch({7: 90, 11: 90, 0: 130, 3: 130})},
     {"time": 600, "servos": patch({0: 50, 3: 50})},
     {"time": 750, "servos": patch()},
 ]
 
 LANDING: List[Dict] = [
-    {"time": 0,   "servos": patch({"TAIL_LIFT": 70, 0: 100, 3: 100})},  # тормоз крыльями/хвостом
-    {"time": 250, "servos": patch({7: 70, 11: 70, 8: 70, 12: 70})},     # лапы вперёд
-    {"time": 500, "servos": patch({7: 90, 11: 90})},                    # касание
-    {"time": 700, "servos": patch()},                                  # стойка
+    {"time": 0,   "servos": patch({"TAIL_LIFT": 70, 0: 100, 3: 100})},
+    {"time": 250, "servos": patch({7: 70, 11: 70, 8: 70, 12: 70})},
+    {"time": 500, "servos": patch({7: 90, 11: 90})},
+    {"time": 700, "servos": patch()},
 ]
 
 
@@ -156,15 +155,16 @@ def _repeat_frames(single_cycle: List[Dict], count: int) -> List[Dict]:
     for rep in range(count):
         for i, kf in enumerate(single_cycle):
             if rep > 0 and i == 0:
-                continue  # не дублировать стыковой кадр
+                continue
             frames.append({"time": offset + kf["time"], "servos": list(kf["servos"])})
         offset += cycle_duration
     return frames
 
 
-def build_walk(distance_cm: float) -> List[Dict]:
-    steps = round(abs(distance_cm) / STEP_LENGTH_CM)
-    return _repeat_frames(SINGLE_STEP, steps)
+def build_walk(distance_cm: float = 0.0, steps: Optional[int] = None) -> List[Dict]:
+    if steps is None:
+        steps = round(abs(distance_cm) / STEP_LENGTH_CM)
+    return _repeat_frames(SINGLE_STEP, max(0, int(steps)))
 
 
 def build_flight_forward(distance_cm: float) -> List[Dict]:
@@ -175,7 +175,6 @@ def build_flight_forward(distance_cm: float) -> List[Dict]:
 def build_turn(angle_deg: float) -> List[Dict]:
     ticks = round(abs(angle_deg) / TURN_STEP_DEG)
     frames = _repeat_frames(SINGLE_TURN_TICK, ticks)
-    # Зеркало для отрицательного угла: инвертируем TAIL_YAW относительно 90°
     if angle_deg < 0 and frames:
         for kf in frames:
             yaw = kf["servos"][14]

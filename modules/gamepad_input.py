@@ -1,8 +1,9 @@
 """Геймпад — пункт 11 архитектуры.
 
 Физически подключается к ПК по Bluetooth, читается через pygame.joystick.
-Левый стик — ходьба/полёт (вперёд/назад = дистанция, влево/вправо = поворот),
-правый стик — зарезервирован (пока не используется), кнопки — взлёт/посадка.
+Раскладка под DualShock 4 (SDL2 / pygame 2.x). Левый стик — ходьба/поворот
+(вперёд/назад = дистанция, влево/вправо = поворот), правый стик и остальные
+кнопки пока не назначены, ✕/○ — взлёт/посадка, L2/R2 — аналоговые триггеры (0…1).
 
 Команды идут через RobotBrain.handle_command() с source="gamepad".
 Локомоция активна только в control_mode == "manual".
@@ -23,47 +24,38 @@ logger = logging.getLogger(__name__)
 
 POLL_HZ = 30
 
-# TUNE: индексы осей/кнопок — подберите под свой геймпад
-# (python -m pygame.examples.joystick)
-AXIS_LX = 0          # левый стик X  (−1 = влево, +1 = вправо) → поворот
-AXIS_LY = 1          # левый стик Y  (−1 = вверх, +1 = вниз)  → вперёд/назад (инвертируем)
-AXIS_RX = 2          # правый стик X (зарезервирован)
-AXIS_RY = 3          # правый стик Y (зарезервирован)
-AXIS_LT = 4          # L2 / LT (если аналоговый)
-AXIS_RT = 5          # R2 / RT
+# TUNE: индексы осей/кнопок под DualShock 4 (python -m pygame.examples.joystick)
+AXIS_LX = 0
+AXIS_LY = 1
+AXIS_RX = 2
+AXIS_RY = 3
+AXIS_L2 = 4
+AXIS_R2 = 5
 
-BUTTON_A = 0         # A / Cross     → взлёт
-BUTTON_B = 1         # B / Circle    → посадка
-BUTTON_X = 2         # X / Square
-BUTTON_Y = 3         # Y / Triangle
-BUTTON_LB = 4        # L1 / LB
-BUTTON_RB = 5        # R1 / RB
-BUTTON_SELECT = 6
-BUTTON_START = 7
+BUTTON_CROSS = 0
+BUTTON_CIRCLE = 1
+BUTTON_SQUARE = 2
+BUTTON_TRIANGLE = 3
+BUTTON_L1 = 9
+BUTTON_R1 = 10
 
-# Подписи для панели (имя на схеме → назначение)
 BUTTON_LABELS = {
-    BUTTON_A: ("A", "Взлёт"),
-    BUTTON_B: ("B", "Посадка"),
-    BUTTON_X: ("X", "—"),
-    BUTTON_Y: ("Y", "—"),
-    BUTTON_LB: ("LB", "—"),
-    BUTTON_RB: ("RB", "—"),
-    BUTTON_SELECT: ("Select", "—"),
-    BUTTON_START: ("Start", "—"),
+    BUTTON_CROSS: ("CROSS", "Взлёт"),
+    BUTTON_CIRCLE: ("CIRCLE", "Посадка"),
+    BUTTON_SQUARE: ("SQUARE", "—"),
+    BUTTON_TRIANGLE: ("TRIANGLE", "—"),
+    BUTTON_L1: ("L1", "—"),
+    BUTTON_R1: ("R1", "—"),
 }
-AXIS_LABELS = {
-    "lx": ("LX", "Поворот"),
-    "ly": ("LY", "Вперёд / назад"),
-    "rx": ("RX", "—"),
-    "ry": ("RY", "—"),
+TRIGGER_LABELS = {
+    "l2": ("L2", "—"),
+    "r2": ("R2", "—"),
 }
 
 DEADZONE = 0.15
 MAX_STEP_DISTANCE_CM = 20.0
 MAX_TURN_DEG = 30.0
 MIN_COOLDOWN_S = 0.15
-# Как часто слать gamepad_state на панель (не каждый poll — экономим WS)
 STATE_BROADCAST_HZ = 10
 
 
@@ -77,6 +69,7 @@ class GamepadInput:
         self._connected = False
         self._last_state_ts = 0.0
         self._name = ""
+        self._trigger_rest = {AXIS_L2: -1.0, AXIS_R2: -1.0}
 
     @property
     def connected(self) -> bool:
@@ -96,6 +89,7 @@ class GamepadInput:
             self._joystick.init()
             self._name = self._joystick.get_name()
             self._connected = True
+            self._calibrate_triggers()
             logger.info(f"[gamepad] Подключен: {self._name}")
         except ImportError:
             logger.warning("[gamepad] pygame не установлен (pip install pygame)")
@@ -112,6 +106,20 @@ class GamepadInput:
             self._task = None
         self._connected = False
 
+    def _calibrate_triggers(self):
+        j = self._joystick
+        for axis in self._trigger_rest:
+            raw = j.get_axis(axis) if j.get_numaxes() > axis else -1.0
+            self._trigger_rest[axis] = raw if -1.01 <= raw <= 0.1 else -1.0
+
+    def _trigger_value(self, axis: int) -> float:
+        j = self._joystick
+        if j.get_numaxes() <= axis:
+            return 0.0
+        rest = self._trigger_rest[axis]
+        value = (j.get_axis(axis) - rest) / (1.0 - rest)
+        return max(0.0, min(1.0, value))
+
     def _read_raw(self) -> Dict[str, Any]:
         j = self._joystick
         lx = j.get_axis(AXIS_LX) if j.get_numaxes() > AXIS_LX else 0.0
@@ -123,6 +131,11 @@ class GamepadInput:
         for idx, (label, purpose) in BUTTON_LABELS.items():
             pressed = bool(j.get_button(idx)) if j.get_numbuttons() > idx else False
             buttons[label] = {"pressed": pressed, "purpose": purpose, "index": idx}
+
+        triggers = {}
+        for key, axis in (("l2", AXIS_L2), ("r2", AXIS_R2)):
+            label, purpose = TRIGGER_LABELS[key]
+            triggers[key] = {"value": round(self._trigger_value(axis), 3), "label": label, "purpose": purpose}
 
         return {
             "type": "gamepad_state",
@@ -136,6 +149,7 @@ class GamepadInput:
                 "ry": {"value": round(ry, 3), "label": "RY", "purpose": "—"},
             },
             "buttons": buttons,
+            "triggers": triggers,
         }
 
     async def _emit_state(self, state: Dict[str, Any]):
@@ -159,16 +173,14 @@ class GamepadInput:
                 now = time.monotonic()
                 state = self._read_raw()
 
-                # Визуализация — чаще, чем команды
                 if now - self._last_state_ts >= 1.0 / STATE_BROADCAST_HZ:
                     self._last_state_ts = now
                     await self._emit_state(state)
 
-                # Локомоция только в manual
                 if not control_mode.is_manual():
                     continue
 
-                forward = -state["axes"]["ly"]["value"]  # вверх стика = вперёд
+                forward = -state["axes"]["ly"]["value"]
                 turn = state["axes"]["lx"]["value"]
 
                 if abs(forward) > DEADZONE and now >= self._cooldown_until:
@@ -189,12 +201,12 @@ class GamepadInput:
                     }))
 
                 btns = state["buttons"]
-                if btns.get("A", {}).get("pressed") and now >= self._cooldown_until:
+                if btns.get("CROSS", {}).get("pressed") and now >= self._cooldown_until:
                     self._cooldown_until = now + motion_primitives.takeoff_duration_s()
                     asyncio.create_task(self._handle_command({
                         "type": "takeoff", "source": "gamepad",
                     }))
-                if btns.get("B", {}).get("pressed") and now >= self._cooldown_until:
+                if btns.get("CIRCLE", {}).get("pressed") and now >= self._cooldown_until:
                     self._cooldown_until = now + motion_primitives.landing_duration_s()
                     asyncio.create_task(self._handle_command({
                         "type": "land", "source": "gamepad",

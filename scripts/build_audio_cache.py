@@ -55,9 +55,6 @@ def main():
         entry_id = entry.get("id", "?")
         responses = entry.get("responses")
         if not responses:
-            # старая форма ('response' без 'responses') — офлайн-кэш под неё
-            # не строим: смысл миграции на 'responses' как раз в том, чтобы
-            # явно проставить путь 'audio' для каждой записи, которую хотим кэшировать
             continue
 
         for i, resp in enumerate(responses):

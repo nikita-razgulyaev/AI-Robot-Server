@@ -41,7 +41,7 @@
 | Короткие реакции голосом | `character/quick_answers.json` (записи `behavior_*`, `triggers: []`) | `POST /quick_answers/reload` |
 | Эмоции и позы эмоций | `character/Soren_emotions.json` | перезапуск |
 | Тайминги подтверждения, окно «сам взлетел», вкл/выкл | секция `behavior:` в `config.yaml` | перезапуск |
-| Пины кнопок, полярность, дебаунс | `firmware/esp32_ai_robot_server.ino` (`PAW_BUTTON_PIN`, `WING_BUTTON_PIN`, …) | перепрошивка |
+| Пины кнопок, полярность, дебаунс | `arduino-owl-model/arduino-owl-model.ino` (`PAW_BUTTON_PIN`, `WING_BUTTON_PIN`, …) | перепрошивка |
 | Кинематика ходьбы/полёта/взлёта/посадки | `modules/motion_primitives.py` (сейчас заглушки, значения из чек-листов) | перезапуск |
 | Приоритеты источников | `modules/arbiter.py` (`Priority`) | перезапуск |
 | Микродвижения («дыхание» 1–2°) | секция `micro_jitter:` в `config.yaml` (по умолчанию `enabled: false`) | перезапуск |
@@ -54,7 +54,7 @@
 
 | Файл | Роль |
 |---|---|
-| `firmware/esp32_ai_robot_server.ino` | чтение кнопок, дебаунс, `sensor`-сообщения, кнопки в `device_state` |
+| `arduino-owl-model/arduino-owl-model.ino` | чтение кнопок, дебаунс, `sensor`-сообщения, кнопки в `device_state` |
 | `modules/behavior.py` | состояние опоры, события, правила, флаг «сам взлетел», `can_takeoff()` |
 | `modules/servo_controller.py` | `cancel_current()` — прервать текущую анимацию, не сбрасывая позу |
 | `modules/robot_brain.py` | `takeoff` разрешён только из `standing` (если данные кнопок есть), ставит флаг «сам взлетел» |
