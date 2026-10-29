@@ -205,9 +205,6 @@ class ServoController:
         if frames:
             await self._smooth_lead_in(frames[0]["servos"], on_frame)
 
-        if frames:
-            await self._smooth_lead_in(frames[0]["servos"], on_frame)
-
         self._active_task = asyncio.current_task()
         try:
             for i, keyframe in enumerate(frames):
@@ -221,6 +218,22 @@ class ServoController:
         finally:
             if self._active_task is asyncio.current_task():
                 self._active_task = None
+
+    async def cancel_current(self):
+        """Отменяет текущую анимацию/примитив (если есть), НЕ трогая позу серв —
+        в отличие от emergency_stop() не возвращает их в нейтраль. Нужна, когда
+        более приоритетный источник (например реакция на потерю опоры, см.
+        modules/behavior.py) должен сразу запустить своё движение поверх
+        того, что играло: play_animation() иначе отказывает, пока флаг
+        is_animating поднят."""
+        task = self._active_task
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self.is_animating = False
 
     async def emergency_stop(self, on_frame: Optional[Callable[[List[int]], Awaitable[None]]] = None):
         """Пункт 3 (SAFETY): немедленно отменяет текущую анимацию/примитив

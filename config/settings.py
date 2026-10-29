@@ -59,8 +59,6 @@ SERVER_PORT = _config.get("server", {}).get("port", 8765)
 
 # Paths
 MODELS_DIR = BASE_DIR / "models"
-AUDIO_CACHE_DIR = BASE_DIR / "audio_cache"
-AUDIO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # WiFi (из .env)
 WIFI_SSID = os.getenv("WIFI_SSID", "")
@@ -268,6 +266,28 @@ ANIMATIONS = {
 # только специально сделанные мягкие idle-анимации — до этого idle_thoughts
 # просто ничего не проигрывает (см. warning в логе при пустом списке).
 IDLE_ANIMATIONS = []
+
+# === Микродвижения («дыхание») ===
+# Джиттер-слой (modules/micro_motion.py) подмешивает к позе покоя колебания в 1–2°.
+# По умолчанию ВЫКЛЮЧЕН: такие движения не нужны и засоряют лог. Включается в config.yaml:
+# micro_jitter: {enabled: true}. (Профили в micro_motion.py — заглушки со старыми индексами серв.)
+MICRO_JITTER_ENABLED = bool(_config.get("micro_jitter", {}).get("enabled", False))
+
+# === Поведение по датчикам опоры (кнопки в лапе и в крыле) ===
+# См. modules/behavior.py и character/behavior/rules.yaml. Значения берутся
+# из секции behavior: в config.yaml; дефолты ниже — на случай, если секции нет.
+BEHAVIOR_CFG = _config.get("behavior", {})
+BEHAVIOR_ENABLED = bool(BEHAVIOR_CFG.get("enabled", True))
+BEHAVIOR_RULES_FILE = BASE_DIR / BEHAVIOR_CFG.get("rules_file", "character/behavior/rules.yaml")
+# Сколько мс новое состояние опоры должно держаться, чтобы считаться настоящим
+# (механические кнопки врут/дребезжат; основной дебаунс — уже на самой плате)
+BEHAVIOR_CONFIRM_MS = int(BEHAVIOR_CFG.get("confirm_ms", 40))
+# То же для "опоры нет" — подтверждаем дольше, чтобы короткий отрыв кнопки
+# (например при шаге) не считался падением
+BEHAVIOR_CONFIRM_NONE_MS = int(BEHAVIOR_CFG.get("confirm_none_ms", 80))
+# Сколько секунд после команды взлёта потеря опоры считается "своей" (взлёт),
+# а не падением. Сбрасывается раньше — касанием, посадкой или тем, что робота взяли в руки
+BEHAVIOR_SELF_FLIGHT_TIMEOUT_SEC = float(BEHAVIOR_CFG.get("self_flight_timeout_sec", 60))
 
 # === Авторизация панели мониторинга / устройства ===
 # Один общий пароль (это личный робот, а не сервис на много пользователей).

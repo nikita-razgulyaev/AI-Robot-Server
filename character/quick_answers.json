@@ -49,5 +49,21 @@
     "triggers": ["пока", "до свидания", "увидимся", "прощай", "до встречи"],
     "response": "До скорой встречи, друг! Пусть Глаукс хранит тебя.",
     "emotion": "loving"
+  },
+  {
+    "id": "behavior_fall",
+    "triggers": [],
+    "responses": [
+      {"text": "Ой!", "emotion": "alert"},
+      {"text": "Ай!", "emotion": "alert"}
+    ]
+  },
+  {
+    "id": "behavior_relief",
+    "triggers": [],
+    "responses": [
+      {"text": "Уф...", "emotion": "calm"},
+      {"text": "Фух, всё в порядке.", "emotion": "calm"}
+    ]
   }
 ]

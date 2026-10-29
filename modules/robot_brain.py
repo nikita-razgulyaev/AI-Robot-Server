@@ -21,6 +21,8 @@ from modules.wake_word import strip_wake_word
 from modules.animation_loader import animation_book
 from modules.arbiter import arbiter, Priority
 from modules import motion_primitives
+from modules.behavior import behavior_engine
+from modules.chat_log import chat_log
 from config.settings import (
     CHARACTER_DIR,
     FAST_MODE,
@@ -446,6 +448,8 @@ class RobotBrain:
 
         logger.info(f"Пользователь: {command_text or '(только будильник, без команды)'}")
         self.mark_dialog_active()
+        # Вопрос — в чат панели СРАЗУ после распознавания, не дожидаясь ответа (LLM/TTS)
+        chat_log.emit("user", command_text or user_text, source="robot")
 
         # Словарь быстрых ответов -> память -> LLM — вся логика в одном месте
         # (см. generate_reply), чтобы не размножать её по каждой точке входа.
@@ -460,6 +464,8 @@ class RobotBrain:
         logger.info(f"Эмоция: {emotion}")
         if action:
             logger.info(f"Действие: {action}")
+        # Ответ тоже показываем сразу, до синтеза речи (озвучка может занять секунды)
+        chat_log.emit("bot", response_text, emotion=emotion, source="robot")
 
         servo_angles = self.emotion_engine.get_servo_angles(emotion)
         eye_led = self.emotion_engine.get_eye_led(emotion)
@@ -511,6 +517,10 @@ class RobotBrain:
         пишет TTSEngine.synthesize_to_wav())."""
         if not rel_path:
             return None
+        if not isinstance(rel_path, str) or len(rel_path) > 260:
+            # Это не относительный путь к WAV (например, случайно передали сами аудиоданные) —
+            # молча считаем, что кэша нет; вызывающий код пойдёт на живой TTS.
+            return None
         path = CHARACTER_DIR / rel_path
         if not path.exists():
             logger.warning(f"[audio_cache] Файл не найден: {path} — использую live TTS")
@@ -532,7 +542,10 @@ class RobotBrain:
         cached = self._load_cached_audio(cached_rel_path)
         if cached is not None:
             return cached
-        return self.tts.synthesize(text)
+        audio = self.tts.synthesize(text)
+        if not audio:
+            logger.warning(f"[TTS] Пустое аудио для фразы {text[:60]!r} — на динамик ничего не уйдёт (см. ошибки TTS выше)")
+        return audio
 
     def _try_quick_answer(self, user_text: str) -> Optional[dict]:
         """Проверяет словарь быстрых ответов (character/quick_answers.json) ДО
@@ -621,6 +634,8 @@ class RobotBrain:
         llm_result = self.generate_reply(user_text)
 
         emotion = llm_result.get("emotion", "calm")
+        bot_chat_id = chat_log.emit("bot", llm_result["text"], emotion=emotion, source="panel")  # до синтеза речи
+        self._last_bot_chat_id = bot_chat_id
         servo_angles = self.emotion_engine.get_servo_angles(emotion)
         eye_led = self.emotion_engine.get_eye_led(emotion)
         tts_audio = self._synthesize_or_cached(llm_result["text"], llm_result.get("audio"))
@@ -851,6 +866,13 @@ class RobotBrain:
             # но source можно переопределить (например, тестовый вызов с панели).
             source = Priority[command.get("source", "GAMEPAD").upper()]
 
+            # Взлёт разрешён только со стойки на опоре (кнопка лапы нажата, крыла нет).
+            # Если данных от кнопок нет — не блокируем (см. BehaviorEngine.can_takeoff)
+            if cmd_type == "takeoff":
+                takeoff_ok, takeoff_reason = behavior_engine.can_takeoff()
+                if not takeoff_ok:
+                    return {"status": "rejected", "message": takeoff_reason}
+
             if cmd_type == "walk":
                 frames = motion_primitives.build_walk(command["distance_cm"])
             elif cmd_type == "fly":
@@ -873,6 +895,9 @@ class RobotBrain:
             if self.servos.is_animating:
                 return {"status": "rejected", "message": "Сервы заняты другой анимацией/примитивом"}
             asyncio.create_task(self.servos.play_motion(frames, on_frame=self.on_servo_frame))
+            if cmd_type == "takeoff":
+                # Дальше потеря опоры — это наш взлёт, а не падение (см. modules/behavior.py)
+                behavior_engine.begin_self_flight()
 
             # Пункт 4: если для этого типа события в quick_answers.json заведена
             # запись с id вида "motion_takeoff"/"motion_land" — отдаём её sfx/audio
@@ -912,6 +937,9 @@ class RobotBrain:
                     }
 
             self.mark_dialog_active()
+            # Вопрос — в чат всем панелям сразу (id берём у панели, чтобы она не нарисовала дубль)
+            user_chat_id = await chat_log.emit_async("user", command_text or user_text, source="panel",
+                                                    chat_id=command.get("client_id"))
             self.is_processing = True
             try:
                 loop = asyncio.get_event_loop()
@@ -934,7 +962,9 @@ class RobotBrain:
                     "action": result.get("action"),
                     "emotion": result["emotion"],
                     "servo_angles": result["servo_angles"],
-                    "eye_led": result["eye_led"]
+                    "eye_led": result["eye_led"],
+                    "user_chat_id": user_chat_id,
+                    "bot_chat_id": getattr(self, "_last_bot_chat_id", None),
                 }
             finally:
                 self.is_processing = False

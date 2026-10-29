@@ -18,6 +18,9 @@ from modules.micro_motion import MicroJitter
 from modules.gamepad_input import GamepadInput
 from modules.wake_word import strip_wake_word
 from modules.animation_loader import animation_book
+from modules.behavior import behavior_engine
+from modules.quick_answers import quick_answers
+from modules.chat_log import chat_log
 from modules.auth import create_session_token, verify_session_token, is_valid_device_ping
 from modules import backlight_state
 from modules.backlight import is_night
@@ -28,6 +31,7 @@ from config.settings import (
     PANEL_PASSWORD, DEVICE_KEY,
     SESSION_COOKIE_NAME, SESSION_SHORT_MAX_AGE_SEC, SESSION_REMEMBER_MAX_AGE_SEC,
     BACKLIGHT_LATITUDE, BACKLIGHT_LONGITUDE, BACKLIGHT_TIMEZONE, BACKLIGHT_CHECK_INTERVAL_SEC,
+    MICRO_JITTER_ENABLED,
 )
 
 logging.basicConfig(
@@ -108,11 +112,26 @@ async def startup():
     idle_thoughts.start()
 
     global micro_jitter
-    micro_jitter = MicroJitter(
-        get_current_angles=robot_brain.servos.get_current_angles,
+    if MICRO_JITTER_ENABLED:
+        micro_jitter = MicroJitter(
+            get_current_angles=robot_brain.servos.get_current_angles,
+            on_frame=broadcast_servo_state,
+        )
+        micro_jitter.start()
+    else:
+        logger.info("[jitter] Микродвижения отключены (config.yaml: micro_jitter.enabled)")
+
+    # Журнал диалога: реплики (голос робота, голос ПК, текст) рассылаются всем панелям
+    chat_log.bind(asyncio.get_running_loop(), broadcast_to_panels)
+
+    # Поведение по датчикам опоры (кнопки в лапе/крыле) — реакции из character/behavior/rules.yaml
+    behavior_engine.attach(
+        servos=robot_brain.servos,
         on_frame=broadcast_servo_state,
+        get_emotion=lambda: robot_brain.current_emotion,
+        set_emotion=lambda e: setattr(robot_brain, "current_emotion", e),
+        play_phrase=play_behavior_phrase,
     )
-    micro_jitter.start()
 
     global gamepad_input
     gamepad_input = GamepadInput(handle_command=dispatch_command_with_sfx)
@@ -164,7 +183,8 @@ async def status():
         "servo_angles": robot_brain.servos.get_current_angles(),
         "vision_context": robot_brain.vision_context,
         "current_emotion": robot_brain.current_emotion,
-        "dialog_active": robot_brain.is_dialog_active()
+        "dialog_active": robot_brain.is_dialog_active(),
+        "behavior": behavior_engine.status()
     }
 
 @app.post("/audio_mode")
@@ -340,8 +360,26 @@ async def reload_animations():
 
     return JSONResponse(result)
 
+@app.get("/chat/history")
+async def chat_history(limit: int = 100):
+    """Последние реплики диалога (для только что открытой панели). Дедупликация на стороне панели — по id."""
+    return JSONResponse({"status": "ok", "messages": chat_log.history(max(1, min(limit, 200)))})
+
+@app.post("/chat/clear")
+async def chat_clear():
+    chat_log.clear()
+    return JSONResponse({"status": "ok"})
+
+@app.post("/behavior/reload")
+async def reload_behavior():
+    """Перечитывает character/behavior/rules.yaml — без рестарта сервера.
+    Используется после правки правил реакций на события опоры."""
+    count = behavior_engine.reload_rules()
+    logger.info(f"🧭 Правила поведения перезагружены: {count}")
+    return JSONResponse({"status": "ok", "rules": count, "behavior": behavior_engine.status()})
+
 @app.post("/speak")
-async def speak_text(text: str = Form(...)):
+async def speak_text(text: str = Form(...), client_id: str = Form("")):
     logger.info(f"/speak вызван: '{text}'")
 
     if robot_brain is None:
@@ -377,20 +415,25 @@ async def speak_text(text: str = Form(...)):
 
         robot_brain.mark_dialog_active()
 
-        llm_result = robot_brain.generate_reply(command_text)
+        # Вопрос — в чат всем панелям сразу (до LLM); id панели совпадает с её локальным, дубля не будет
+        user_chat_id = await chat_log.emit_async("user", command_text or user_text, source="panel", chat_id=client_id or None)
+
+        loop = asyncio.get_running_loop()
+        llm_result = await loop.run_in_executor(robot_brain._speech_executor, robot_brain.generate_reply, command_text)
         response_text = llm_result.get("text", "")
         action = llm_result.get("action")
         emotion = llm_result.get("emotion", "calm")
 
         if not response_text:
             return JSONResponse({"status": "error", "message": "LLM вернул пустой ответ"})
+        bot_chat_id = await chat_log.emit_async("bot", response_text, emotion=emotion, source="panel")  # до синтеза речи
 
         servo_angles = robot_brain.emotion_engine.get_servo_angles(emotion)
         eye_led = robot_brain.emotion_engine.get_eye_led(emotion)
 
         # Текст от LLM уже готов — даже если синтез речи не удастся, ответ всё равно
         # должен дойти до чата (просто без озвучки), а не теряться целиком.
-        tts_audio = robot_brain.tts.synthesize(response_text)
+        tts_audio = await loop.run_in_executor(robot_brain._speech_executor, robot_brain.tts.synthesize, response_text)
         if not tts_audio:
             logger.warning("TTS не вернул аудио — отправляем текстовый ответ без озвучки")
 
@@ -415,6 +458,8 @@ async def speak_text(text: str = Form(...)):
             "text": command_text,
             "raw_text": text,
             "response": response_text,
+            "user_chat_id": user_chat_id,
+            "bot_chat_id": bot_chat_id,
             "action": action,
             "emotion": emotion,
             "servo_angles": servo_angles,
@@ -452,8 +497,11 @@ async def voice_input(
             tmp_path = tmp.name
 
         logger.info("Распознавание речи...")
-        stt_result = robot_brain.stt.transcribe_from_file(tmp_path)
-        os.unlink(tmp_path)
+        loop = asyncio.get_running_loop()
+        try:
+            stt_result = await loop.run_in_executor(robot_brain._speech_executor, robot_brain.stt.transcribe_from_file, tmp_path)
+        finally:
+            os.unlink(tmp_path)
 
         if not stt_result.get("success"):
             return JSONResponse({"status": "error", "message": "Речь не распознана", "stt_error": stt_result.get("error")})
@@ -485,15 +533,19 @@ async def voice_input(
 
         robot_brain.mark_dialog_active()
 
-        llm_result = robot_brain.generate_reply(command_text)
+        # Вопрос — в чат СРАЗУ после распознавания, не дожидаясь ответа
+        user_chat_id = await chat_log.emit_async("user", command_text or user_text, source="pc")
+
+        llm_result = await loop.run_in_executor(robot_brain._speech_executor, robot_brain.generate_reply, command_text)
         response_text = llm_result.get("text", "")
         action = llm_result.get("action")
         emotion = llm_result.get("emotion", "calm")
+        bot_chat_id = await chat_log.emit_async("bot", response_text, emotion=emotion, source="pc")  # до синтеза речи
 
         servo_angles = robot_brain.emotion_engine.get_servo_angles(emotion)
         eye_led = robot_brain.emotion_engine.get_eye_led(emotion)
 
-        tts_audio = robot_brain.tts.synthesize(response_text)
+        tts_audio = await loop.run_in_executor(robot_brain._speech_executor, robot_brain.tts.synthesize, response_text)
 
         if action:
             asyncio.create_task(robot_brain.servos.play_animation(action, on_frame=robot_brain.on_servo_frame))
@@ -516,6 +568,8 @@ async def voice_input(
             "user_text": command_text,
             "raw_text": raw_text,
             "response": response_text,
+            "user_chat_id": user_chat_id,
+            "bot_chat_id": bot_chat_id,
             "action": action,
             "emotion": emotion,
             "servo_angles": servo_angles,
@@ -605,6 +659,7 @@ async def websocket_endpoint(websocket: WebSocket):
         panel_wants_video.pop(websocket, None)
         _state_report_events.pop(websocket, None)
         if was_device:
+            behavior_engine.reset()  # состояние опоры неизвестно, пока плата не вернётся
             # Плата отключилась (например, перезагружается) — сразу говорим
             # панели "Offline", не дожидаясь, пока кто-то вручную обновит страницу.
             await notify_panels_status_changed()
@@ -680,7 +735,8 @@ async def broadcast_servo_angles_to_devices(angles: List[int]):
         logger.debug("📡 [TX servo] broadcast skipped — no device connections")
         return
     servo_cmd = {"type": "servo_update", "angles": {str(i): a for i, a in enumerate(angles)}}
-    logger.info(f"📡 [TX servo] broadcast → {len(device_connections)} device(s), angles: {angles}")
+    # DEBUG, а не INFO: кадр уходит на каждый тик анимации/слежения, на INFO он забивал терминал
+    logger.debug(f"📡 [TX servo] broadcast → {len(device_connections)} device(s), angles: {angles}")
     dead = []
     for conn in list(device_connections):
         try:
@@ -871,6 +927,34 @@ async def broadcast_to_panels(message: dict, recipients: Optional[Set[WebSocket]
         panel_wants_video.pop(conn, None)
 
 
+async def play_behavior_phrase(phrase_id: str):
+    """Проигрывает короткую реакцию («Ой!», вздох) по id записи из quick_answers.json.
+    Если у варианта есть sfx — играет его кэш; иначе audio-кэш или живой TTS
+    (в отдельном потоке, чтобы не блокировать event loop). Для мгновенной
+    реакции задайте audio в записи (scripts/build_audio_cache.py)."""
+    if robot_brain is None or not device_connections:
+        return
+    qa = quick_answers.get_by_id(phrase_id)
+    if qa is None:
+        logger.warning(f"[behavior] Фраза «{phrase_id}» не найдена в quick_answers.json")
+        return
+    variant = quick_answers.pick_response(qa)
+    try:
+        if variant.sfx:
+            pcm = robot_brain._load_cached_audio(variant.sfx)
+        else:
+            loop = asyncio.get_running_loop()
+            pcm = await loop.run_in_executor(
+                robot_brain._speech_executor, robot_brain._synthesize_or_cached, variant.text, variant.audio
+            )
+    except Exception as e:
+        logger.error(f"[behavior] Не удалось получить аудио для «{phrase_id}»: {e}")
+        return
+    if pcm:
+        for device_ws in list(device_connections):
+            asyncio.create_task(send_audio_to_device(device_ws, pcm))
+
+
 async def dispatch_command_with_sfx(command: dict) -> dict:
     """Единая обёртка над robot_brain.handle_command(): выполняет команду И
     рассылает sfx/audio на устройство, если результат его содержит (см.
@@ -880,7 +964,10 @@ async def dispatch_command_with_sfx(command: dict) -> dict:
     чтобы звук на локомоцию не зависел от того, кто именно её вызвал."""
     result = await robot_brain.handle_command(command)
 
-    sfx_or_audio = result.get("sfx") or result.get("audio")
+    # sfx/audio — это ПУТЬ к файлу кэша, и только у результатов движения (взлёт/посадка/ходьба).
+    # У ответа на текстовую команду "audio" — это сам PCM в hex для панели: его нельзя
+    # трактовать как путь (раньше в лог летел весь hex-дамп с «использую live TTS»).
+    sfx_or_audio = (result.get("sfx") or result.get("audio")) if result.get("motion") else None
     if sfx_or_audio:
         pcm = robot_brain._load_cached_audio(sfx_or_audio)
         if pcm:
@@ -899,6 +986,22 @@ async def handle_text_message(websocket: WebSocket, text: str):
                         "list_animations", "reload_animations",
                         "walk", "fly", "turn", "takeoff", "land", "emergency_stop"]:
             result = await dispatch_command_with_sfx(data)
+
+            # Текстовая команда из панели: ответ озвучен на сервере, но раньше PCM уходил ТОЛЬКО
+            # в JSON панели (hex), а на динамик робота не отправлялся вообще. Отправляем на плату
+            # (если выбран вывод «Робот») и не гоняем лишний hex в панель — она им не пользуется.
+            if msg_type == "text":
+                audio_hex = result.pop("audio", "") if isinstance(result, dict) else ""
+                if audio_hex and result.get("status") == "ok":
+                    result["audio_bytes"] = len(audio_hex) // 2
+                    if audio_output_mode == "robot":
+                        if device_connections:
+                            pcm = bytes.fromhex(audio_hex)
+                            for device_ws in list(device_connections):
+                                asyncio.create_task(send_audio_to_device(device_ws, pcm))
+                        else:
+                            logger.warning("📡 [TX audio] плата не подключена — озвучка текстовой команды некому доставить")
+
             await websocket.send_json(result)
             # Гарантированная отправка на ESP32 после ручного управления сервами из панели
             if msg_type in ("servo", "servo_multi"):
@@ -931,6 +1034,10 @@ async def handle_text_message(websocket: WebSocket, text: str):
                 if is_new_device:
                     asyncio.create_task(_handle_new_device_connection(websocket))
             await websocket.send_json({"type": "hello_ack", "client": client})
+        elif msg_type == "sensor":
+            # Датчики опоры с платы: {"type":"sensor","paw":true,"wing":false}.
+            # paw — кнопка в лапе (стоит), wing — кнопка в крыле (держат).
+            behavior_engine.on_sensor(bool(data.get("paw")), bool(data.get("wing")))
         elif msg_type == "device_state":
             # Обратная связь от платы: её РЕАЛЬНОЕ текущее состояние (серво +
             # подсветка), присылается в ответ на request_state (см.
@@ -954,6 +1061,11 @@ async def handle_text_message(websocket: WebSocket, text: str):
                 elif isinstance(raw_angles, list) and len(raw_angles) == 22:
                     angles_list = [int(a) for a in raw_angles]
                 robot_brain.servos.apply_device_state(angles_list)
+
+            # Кнопки опоры в снимке состояния (после (пере)подключения) — принимаем
+            # как начальное состояние, без событий
+            if "paw" in data and "wing" in data:
+                behavior_engine.on_sensor(bool(data.get("paw")), bool(data.get("wing")), initial=True)
 
             raw_backlight = data.get("backlight")
             if raw_backlight is not None:
@@ -1646,6 +1758,7 @@ PANEL_HTML = """
   .chat-empty span{ font-size:12.5px; max-width:280px; line-height:1.5; }
   .msg{ max-width:78%; padding:9px 13px; border-radius:14px; font-size:13px; line-height:1.42; }
   .msg.bot{ align-self:flex-start; background:rgba(var(--surface-rgb),.55); border:1px solid rgba(var(--line-rgb),.25); }
+  .msg-src{ display:block; font-size:10px; opacity:.65; margin-bottom:2px; letter-spacing:.2px; }
   .msg.user{ align-self:flex-end; background:linear-gradient(150deg, var(--amber-2), var(--amber)); color:var(--cream); }
   .chat-input{
     display:flex; gap:8px;
@@ -2156,6 +2269,7 @@ PANEL_HTML = """
     ws.send(JSON.stringify({type:'video_pref', enabled: videoPrefEnabled}));
     ws.send(JSON.stringify({type:'list_animations'}));
     fetchStatus();
+    loadChatHistory();
   };
   ws.onclose = () => {
     setConnection(false);
@@ -2185,8 +2299,12 @@ PANEL_HTML = """
     if (data.type === 'ai_mode' && data.modes) { aiModes = data.modes; updateAIModeUI(); }
     // Ответ на {type:'text'} при audioOutputMode==='robot' — без поля type,
     // только status/response.
+    if (data.type === 'chat_message') {
+      addMessage(data.role, data.text, data.emotion, data.id, data.source);
+      return;
+    }
     if (!data.type && data.status === 'ok' && typeof data.response === 'string') {
-      addMessage('bot', data.response, data.emotion);
+      addMessage('bot', data.response, data.emotion, data.bot_chat_id, 'panel');
       if (data.ai_modes) { aiModes = data.ai_modes; updateAIModeUI(); }
     }
     if (data.modes && !data.type) { aiModes = data.modes; updateAIModeUI(); }
@@ -2227,15 +2345,45 @@ PANEL_HTML = """
   }
 
   // ==================== ЧАТ ====================
-  function addMessage(sender, text, emotion){
+  // Единый чат: реплики приходят событиями chat_message от сервера (голос с робота,
+  // голос с ПК, текст из любой панели), поэтому диалог виден независимо от источника.
+  // seenChatIds защищает от дублей: свою реплику панель рисует сразу, а затем то же
+  // сообщение возвращается событием с тем же id и пропускается.
+  const seenChatIds = new Set();
+  const CHAT_SRC_LABEL = {robot:'🦉 робот', pc:'🎤 микрофон ПК', panel:'⌨ панель'};
+  function newChatId(){
+    return (window.crypto && crypto.randomUUID) ? crypto.randomUUID().replace(/-/g, '')
+      : (Date.now().toString(16) + Math.random().toString(16).slice(2, 12));
+  }
+  function addMessage(sender, text, emotion, id, source){
+    if (!text) return;
+    if (id) {
+      if (seenChatIds.has(id)) return;
+      seenChatIds.add(id);
+    }
     const chat = document.getElementById('chatHistory');
     const empty = document.getElementById('chatEmpty');
     if (empty) empty.remove();
     const div = document.createElement('div');
     div.className = 'msg ' + (sender === 'user' ? 'user' : 'bot');
-    div.textContent = text + (emotion ? ` (${emotion})` : '');
+    if (source && CHAT_SRC_LABEL[source]) {
+      const tag = document.createElement('small');
+      tag.className = 'msg-src';
+      tag.textContent = CHAT_SRC_LABEL[source];
+      div.appendChild(tag);
+    }
+    div.appendChild(document.createTextNode(text + (emotion ? ` (${emotion})` : '')));
     chat.appendChild(div);
     chat.scrollTop = chat.scrollHeight;
+  }
+  async function loadChatHistory(){
+    try {
+      const r = await fetch('/chat/history');
+      const data = await r.json();
+      if (data.status === 'ok' && Array.isArray(data.messages)) {
+        data.messages.forEach(m => addMessage(m.role, m.text, m.emotion, m.id, m.source));
+      }
+    } catch(e) { /* истории может не быть при старте сервера — не критично */ }
   }
 
   async function sendChat(){
@@ -2243,18 +2391,19 @@ PANEL_HTML = """
     const text = input.value.trim();
     if (!text) return;
     input.value = '';
-    addMessage('user', text);
-    if (audioOutputMode === 'robot') sendCmd({type:'text', text});
-    else await sendLocal(text);
+    const cid = newChatId();
+    addMessage('user', text, null, cid, 'panel');   // мгновенно; сервер вернёт то же сообщение с тем же id
+    if (audioOutputMode === 'robot') sendCmd({type:'text', text, client_id: cid});
+    else await sendLocal(text, cid);
   }
 
-  async function sendLocal(text){
+  async function sendLocal(text, cid){
     try {
-      const fd = new FormData(); fd.append('text', text);
+      const fd = new FormData(); fd.append('text', text); if (cid) fd.append('client_id', cid);
       const r = await fetch('/speak', {method:'POST', body:fd});
       const data = await r.json();
       if (data.status === 'ok') {
-        addMessage('bot', data.response, data.emotion);
+        addMessage('bot', data.response, data.emotion, data.bot_chat_id, 'panel');
         if (data.audio_base64) playAudio(data.audio_base64);
         else if (data.tts_failed) log('⚠ Синтез речи не удался — ответ показан без озвучки');
         if (data.ai_modes) { aiModes = data.ai_modes; updateAIModeUI(); }
@@ -2340,8 +2489,10 @@ PANEL_HTML = """
       const r = await fetch('/voice', {method:'POST', body:fd});
       const data = await r.json();
       if (data.status === 'ok') {
-        addMessage('user', data.user_text);
-        addMessage('bot', data.response, data.emotion);
+        // Вопрос и ответ уже пришли событиями chat_message (вопрос — сразу после распознавания);
+        // эти вызовы — страховка на случай, если WebSocket панели недоступен (дубли отсекает id)
+        addMessage('user', data.user_text, null, data.user_chat_id, 'pc');
+        addMessage('bot', data.response, data.emotion, data.bot_chat_id, 'pc');
         if (audioOutputMode === 'local' && data.audio_base64) playAudio(data.audio_base64);
         if (data.ai_modes) { aiModes = data.ai_modes; updateAIModeUI(); }
       } else {

@@ -3,10 +3,11 @@ import io
 import wave
 import logging
 import asyncio
+import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from config.settings import (
-    TTS_MODE, AUDIO_CACHE_DIR, SAMPLE_RATE,
+    TTS_MODE, SAMPLE_RATE,
     FREETTS_VOICE, FREETTS_SPEED, SILERO_SPEAKER
 )
 
@@ -98,15 +99,19 @@ class FreeTTSEngine:
             logger.error(f"Библиотека не установлена: {e}. Установи: pip install edge-tts soundfile librosa numpy")
             return b""
         except Exception as e:
-            logger.error(f"Ошибка FreeTTS (edge-tts): {e}")
-            import traceback
-            traceback.print_exc()
+            # Без traceback и без километрового URL: причина — одной строкой
+            status = getattr(e, "status", None)
+            if status == 403:
+                logger.error("Ошибка FreeTTS (edge-tts): Microsoft отклонил запрос (HTTP 403). "
+                             "Обычно лечится обновлением пакета: pip install -U edge-tts")
+            elif status:
+                logger.error(f"Ошибка FreeTTS (edge-tts): HTTP {status}")
+            else:
+                logger.error(f"Ошибка FreeTTS (edge-tts): {type(e).__name__}: {str(e)[:200]}")
             return b""
 
-    def synthesize_to_wav(self, text: str, output_path: Path = None, speaker: str = None) -> Path:
-        """Синтезирует в WAV файл"""
-        if output_path is None:
-            output_path = AUDIO_CACHE_DIR / f"tts_freetts_{hash(text)}.wav"
+    def synthesize_to_wav(self, text: str, output_path: Path, speaker: str = None) -> Path:
+        """Синтезирует в WAV файл (путь обязателен: папка кэша по умолчанию больше не создаётся)"""
 
         pcm_data = self.synthesize(text)
         if not pcm_data:
@@ -195,9 +200,7 @@ class LocalTTSEngine:
             logger.error(f"Ошибка TTS: {e}")
             return b""
 
-    def synthesize_to_wav(self, text: str, output_path: Path = None, speaker: str = None) -> Path:
-        if output_path is None:
-            output_path = AUDIO_CACHE_DIR / f"tts_local_{hash(text)}.wav"
+    def synthesize_to_wav(self, text: str, output_path: Path, speaker: str = None) -> Path:
 
         pcm_data = self.synthesize(text, speaker or self.default_speaker)
         if not pcm_data:
@@ -226,6 +229,9 @@ class TTSEngine:
         # local/cloud не сбрасывает выбор голоса внутри другого режима.
         self.local_speaker = SILERO_SPEAKER
         self.cloud_speaker = FREETTS_VOICE
+        # После неудачи облака не дёргаем его на каждую фразу (лишняя секунда ожидания):
+        # до этого момента (time.monotonic) сразу идём на локальный Silero.
+        self._cloud_down_until = 0.0
 
         if self.mode == "cloud":
             self.cloud_engine = FreeTTSEngine()
@@ -273,6 +279,18 @@ class TTSEngine:
                 self.local_engine.default_speaker = speaker
             logger.info(f"💻 Голос TTS (локально) → {speaker}")
 
+    CLOUD_RETRY_PAUSE_SEC = 300  # сколько не трогать облако после неудачи
+
+    def _cloud_available(self) -> bool:
+        return time.monotonic() >= self._cloud_down_until
+
+    def _mark_cloud_down(self):
+        was_up = self._cloud_available()
+        self._cloud_down_until = time.monotonic() + self.CLOUD_RETRY_PAUSE_SEC
+        if was_up:
+            logger.warning(f"Облачный TTS недоступен — следующие {self.CLOUD_RETRY_PAUSE_SEC // 60} мин озвучиваю "
+                           f"локальным Silero (потом попробую облако снова)")
+
     def _get_local_fallback(self) -> "LocalTTSEngine":
         """Ленивая инициализация локального Silero — грузится только когда реально
         понадобился запасной вариант (облако недоступно/упало), не при старте,
@@ -287,13 +305,14 @@ class TTSEngine:
         """В cloud-режиме игнорируем speaker из Silero, используем FREETTS_VOICE.
         В local-режиме speaker=None -> берётся SILERO_SPEAKER из config.yaml."""
         if self.mode == "cloud" and self.cloud_engine:
-            # Не передаём speaker — FreeTTSEngine использует self.voice (FREETTS_VOICE)
-            audio = self.cloud_engine.synthesize(text)
-            if audio:
-                return audio
-            # edge-tts — неофициальный клиент, периодически отваливается (Microsoft
-            # меняет защиту). Не молчим — озвучиваем локальным Silero как запасным.
-            logger.warning("Облачный TTS не ответил — переключаюсь на локальный Silero для этой фразы")
+            if self._cloud_available():
+                # Не передаём speaker — FreeTTSEngine использует self.voice (FREETTS_VOICE)
+                audio = self.cloud_engine.synthesize(text)
+                if audio:
+                    return audio
+                # edge-tts — неофициальный клиент, периодически отваливается (Microsoft
+                # меняет защиту). Не молчим — озвучиваем локальным Silero как запасным.
+                self._mark_cloud_down()
             return self._get_local_fallback().synthesize(text, speaker)
         elif self.local_engine:
             return self.local_engine.synthesize(text, speaker)
@@ -301,12 +320,13 @@ class TTSEngine:
             logger.error("TTS движок не инициализирован")
             return b""
 
-    def synthesize_to_wav(self, text: str, output_path: Path = None, speaker: str = None) -> Path:
+    def synthesize_to_wav(self, text: str, output_path: Path, speaker: str = None) -> Path:
         if self.mode == "cloud" and self.cloud_engine:
-            wav_path = self.cloud_engine.synthesize_to_wav(text, output_path)
-            if wav_path:
-                return wav_path
-            logger.warning("Облачный TTS не ответил — переключаюсь на локальный Silero для этой фразы")
+            if self._cloud_available():
+                wav_path = self.cloud_engine.synthesize_to_wav(text, output_path)
+                if wav_path:
+                    return wav_path
+                self._mark_cloud_down()
             return self._get_local_fallback().synthesize_to_wav(text, output_path, speaker)
         elif self.local_engine:
             return self.local_engine.synthesize_to_wav(text, output_path, speaker)
