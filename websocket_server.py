@@ -134,7 +134,10 @@ async def startup():
     )
 
     global gamepad_input
-    gamepad_input = GamepadInput(handle_command=dispatch_command_with_sfx)
+    gamepad_input = GamepadInput(
+        handle_command=dispatch_command_with_sfx,
+        on_state=broadcast_gamepad_state,
+    )
     gamepad_input.start()  # тихо не активируется, если геймпад/pygame не найдены
 
     logger.info(f"✅ Сервер готов: ws://{SERVER_HOST}:{SERVER_PORT}")
@@ -184,7 +187,9 @@ async def status():
         "vision_context": robot_brain.vision_context,
         "current_emotion": robot_brain.current_emotion,
         "dialog_active": robot_brain.is_dialog_active(),
-        "behavior": behavior_engine.status()
+        "behavior": behavior_engine.status(),
+        "control_mode": __import__("modules.control_mode", fromlist=["control_mode"]).control_mode.mode,
+        "gamepad_connected": bool(gamepad_input and gamepad_input.connected),
     }
 
 @app.post("/audio_mode")
@@ -750,6 +755,21 @@ async def broadcast_servo_angles_to_devices(angles: List[int]):
         active_connections.discard(conn)
 
 
+async def broadcast_gamepad_state(state: dict):
+    """Шлёт снимок осей/кнопок геймпада всем панелям (для схемы на UI)."""
+    if not panel_connections:
+        return
+    dead = []
+    for conn in list(panel_connections):
+        try:
+            await conn.send_json(state)
+        except Exception:
+            dead.append(conn)
+    for conn in dead:
+        panel_connections.discard(conn)
+        active_connections.discard(conn)
+
+
 async def broadcast_servo_state(angles: List[int]):
     """Рассылает кадр углов И устройству (как команду servo_update — реально
     двигает сервы), И панелям (как информационное servo_state — просто
@@ -984,7 +1004,8 @@ async def handle_text_message(websocket: WebSocket, text: str):
 
         if msg_type in ["servo", "servo_multi", "animation", "text", "get_status", "clear_history", "set_mode",
                         "list_animations", "reload_animations",
-                        "walk", "fly", "turn", "takeoff", "land", "emergency_stop"]:
+                        "walk", "fly", "turn", "takeoff", "land", "emergency_stop", "return_to_default",
+                        "set_control_mode", "get_control_mode"]:
             result = await dispatch_command_with_sfx(data)
 
             # Текстовая команда из панели: ответ озвучен на сервере, но раньше PCM уходил ТОЛЬКО
@@ -1865,6 +1886,39 @@ PANEL_HTML = """
   .chip-btn.chip-danger{ color:#B2504A; border-color:rgba(178,80,74,.3); }
   .chip-btn.chip-danger:hover{ border-color:#B2504A; }
 
+  /* gamepad scheme */
+  .gamepad-scheme{ display:flex; flex-direction:column; gap:14px; margin-top:4px; }
+  .gp-sticks{ display:flex; gap:18px; justify-content:center; }
+  .gp-stick{ text-align:center; }
+  .gp-stick-label{ font-size:11px; font-weight:600; letter-spacing:.08em; opacity:.7; margin-bottom:6px; }
+  .gp-stick-pad{
+    width:88px; height:88px; border-radius:50%; margin:0 auto;
+    border:1px solid rgba(var(--line-rgb),0.2);
+    background:radial-gradient(circle at 50% 50%, rgba(var(--surface-rgb),.6), rgba(0,0,0,.15));
+    position:relative; box-shadow:inset 0 2px 8px rgba(0,0,0,.25);
+  }
+  .gp-stick-knob{
+    width:28px; height:28px; border-radius:50%; position:absolute; left:50%; top:50%;
+    transform:translate(-50%,-50%);
+    background:linear-gradient(180deg, var(--sage), #6a9a64);
+    box-shadow:0 2px 6px rgba(0,0,0,.35);
+    transition:transform .06s linear;
+  }
+  .gp-stick-meta{ font-size:10.5px; opacity:.55; margin-top:6px; max-width:110px; }
+  .gp-buttons{ display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+  .gp-btn{
+    display:flex; flex-direction:column; align-items:center; gap:2px;
+    padding:8px 6px; border-radius:12px;
+    border:1px solid rgba(var(--line-rgb),0.14);
+    background:rgba(var(--surface-rgb),.35);
+    transition:border-color .12s, background .12s, color .12s;
+  }
+  .gp-btn.active{
+    border-color:var(--amber); background:rgba(var(--amber-rgb),.15); color:var(--amber);
+  }
+  .gp-btn-name{ font-size:13px; font-weight:700; letter-spacing:.04em; }
+  .gp-btn-role{ font-size:10px; opacity:.6; }
+
   /* camera badges */
   .cam-badges{ display:flex; flex-wrap:wrap; gap:8px; justify-content:center; margin-top:14px; }
   .cam-badge{
@@ -1991,6 +2045,7 @@ PANEL_HTML = """
             <button class="tab active" data-tab="chat">Чат</button>
             <button class="tab" data-tab="camera">Камера</button>
             <button class="tab" data-tab="servos">Сервоприводы</button>
+            <button class="tab" data-tab="motion">Движение</button>
             <button class="tab" data-tab="light">Подсветка</button>
           </div>
           <div class="panel-body">
@@ -2052,12 +2107,62 @@ PANEL_HTML = """
                 <select class="select-line" id="animationSelect" onchange="updateAnimationHint()"></select>
                 <button class="chip-btn" onclick="playSelectedAnimation()" title="Запустить выбранную анимацию">▶ Запустить</button>
                 <button class="chip-btn" onclick="reloadAnimations()" title="Перечитать character/animations/*.json">⟳ Обновить</button>
+                <button class="chip-btn" onclick="sendCmd({type:'return_to_default'})" title="Плавно вернуть все сервы в 90° (как при обрыве связи)">↩ В 90°</button>
               </div>
               <p class="hint-text" id="animationHint">—</p>
               <p class="hint-text">
                 Анимации хранятся в <code>character/animations/</code>
               </p>
               <div class="servo-grid" id="servoGrid"></div>
+            </div>
+
+            <div class="tab-pane" data-pane="motion">
+              <div class="mini-card row-between" style="margin-bottom:12px;">
+                <span class="label-sm">Режим управления</span>
+                <div class="segmented" id="controlModeSegmented">
+                  <button id="ctrlManualBtn" class="active" onclick="setControlMode('manual')">Ручное</button>
+                  <button id="ctrlAutoBtn" onclick="setControlMode('autonomous')">Автономное</button>
+                </div>
+              </div>
+              <p class="hint-text" id="controlModeHint">Ручное: геймпад и кнопки ниже. Автономное: геймпад отключён (голос/ИИ смогут переключать режим).</p>
+              <div class="chip-row" style="margin-bottom:12px;">
+                <button class="chip-btn" onclick="sendCmd({type:'walk',distance_cm:10,source:'panel'})">Шаг +10см</button>
+                <button class="chip-btn" onclick="sendCmd({type:'walk',distance_cm:-10,source:'panel'})">Шаг −10см</button>
+                <button class="chip-btn" onclick="sendCmd({type:'turn',angle_deg:-15,source:'panel'})">← 15°</button>
+                <button class="chip-btn" onclick="sendCmd({type:'turn',angle_deg:15,source:'panel'})">15° →</button>
+                <button class="chip-btn" onclick="sendCmd({type:'fly',distance_cm:30,source:'panel'})">Лет +30см</button>
+                <button class="chip-btn" onclick="sendCmd({type:'takeoff',source:'panel'})">Взлёт</button>
+                <button class="chip-btn" onclick="sendCmd({type:'land',source:'panel'})">Посадка</button>
+                <button class="chip-btn chip-danger" onclick="sendCmd({type:'emergency_stop',reason:'panel'})">STOP</button>
+              </div>
+              <div class="mini-card" id="gamepadCard">
+                <div class="row-between" style="margin-bottom:8px;">
+                  <span class="label-sm">Геймпад</span>
+                  <span class="value-lg" id="gamepadStatusTag" style="font-size:13px;">не подключён</span>
+                </div>
+                <div class="gamepad-scheme" id="gamepadScheme">
+                  <div class="gp-sticks">
+                    <div class="gp-stick" id="stickL">
+                      <div class="gp-stick-label">L</div>
+                      <div class="gp-stick-pad"><div class="gp-stick-knob" id="knobL"></div></div>
+                      <div class="gp-stick-meta" id="stickLMeta">LX/LY — поворот / ход</div>
+                    </div>
+                    <div class="gp-stick" id="stickR">
+                      <div class="gp-stick-label">R</div>
+                      <div class="gp-stick-pad"><div class="gp-stick-knob" id="knobR"></div></div>
+                      <div class="gp-stick-meta" id="stickRMeta">RX/RY — резерв</div>
+                    </div>
+                  </div>
+                  <div class="gp-buttons" id="gpButtons">
+                    <div class="gp-btn" data-btn="A"><span class="gp-btn-name">A</span><span class="gp-btn-role">Взлёт</span></div>
+                    <div class="gp-btn" data-btn="B"><span class="gp-btn-name">B</span><span class="gp-btn-role">Посадка</span></div>
+                    <div class="gp-btn" data-btn="X"><span class="gp-btn-name">X</span><span class="gp-btn-role">—</span></div>
+                    <div class="gp-btn" data-btn="Y"><span class="gp-btn-name">Y</span><span class="gp-btn-role">—</span></div>
+                    <div class="gp-btn" data-btn="LB"><span class="gp-btn-name">LB</span><span class="gp-btn-role">—</span></div>
+                    <div class="gp-btn" data-btn="RB"><span class="gp-btn-name">RB</span><span class="gp-btn-role">—</span></div>
+                  </div>
+                </div>
+              </div>
             </div>
 
             <div class="tab-pane" data-pane="light">
@@ -2290,6 +2395,10 @@ PANEL_HTML = """
       fetchStatus();
       return;
     }
+    if (data.type === 'gamepad_state') {
+      updateGamepadUI(data);
+      return;
+    }
     if (data.angles) updateServoDisplay(data.angles);
     if (data.type === 'audio_mode') {
       if (data.input_mode) audioInputMode = data.input_mode;
@@ -2326,12 +2435,72 @@ PANEL_HTML = """
       if (Array.isArray(data.servo_angles)) updateServoDisplay(data.servo_angles);
       if (typeof data.audio_input_mode === 'string') audioInputMode = data.audio_input_mode;
       if (typeof data.audio_output_mode === 'string') audioOutputMode = data.audio_output_mode;
+      if (typeof data.control_mode === 'string') updateControlModeUI(data.control_mode);
+      if (typeof data.gamepad_connected === 'boolean') {
+        const tag = document.getElementById('gamepadStatusTag');
+        if (tag) tag.textContent = data.gamepad_connected ? 'подключён' : 'не подключён';
+      }
       updateAudioModeUI();
       setStatus((data.device_connections || 0) > 0, data.device_connections || 0);
     } catch(e) { log('Не удалось получить статус сервера: ' + e.message); }
   }
 
   function sendCmd(cmd){ ws.send(JSON.stringify(cmd)); log('→ ' + JSON.stringify(cmd)); }
+
+  // ==================== РЕЖИМ УПРАВЛЕНИЯ + СХЕМА ГЕЙМПАДА ====================
+  let controlMode = 'manual';
+  function setControlMode(mode){
+    sendCmd({type:'set_control_mode', mode, reason:'panel'});
+    updateControlModeUI(mode);
+  }
+  function updateControlModeUI(mode){
+    controlMode = mode || controlMode;
+    const man = document.getElementById('ctrlManualBtn');
+    const aut = document.getElementById('ctrlAutoBtn');
+    if (man && aut){
+      man.classList.toggle('active', controlMode === 'manual');
+      aut.classList.toggle('active', controlMode === 'autonomous');
+    }
+    const hint = document.getElementById('controlModeHint');
+    if (hint){
+      hint.textContent = controlMode === 'manual'
+        ? 'Ручное: геймпад и кнопки ниже активны. Голосом: «режим автономный» / «режим ручной» (через quick_answers).'
+        : 'Автономное: геймпад отключён. Панель и будущий ИИ-планировщик могут отдавать walk/fly/turn.';
+    }
+  }
+  function updateGamepadUI(data){
+    const tag = document.getElementById('gamepadStatusTag');
+    if (tag) tag.textContent = data.connected ? (data.name || 'подключён') : 'не подключён';
+    if (data.control_mode) updateControlModeUI(data.control_mode);
+    const axes = data.axes || {};
+    const moveKnob = (id, x, y) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const r = 28; // px радиус хода
+      const nx = Math.max(-1, Math.min(1, x || 0));
+      const ny = Math.max(-1, Math.min(1, y || 0));
+      el.style.transform = `translate(calc(-50% + ${nx * r}px), calc(-50% + ${ny * r}px))`;
+    };
+    moveKnob('knobL', axes.lx && axes.lx.value, axes.ly && axes.ly.value);
+    moveKnob('knobR', axes.rx && axes.rx.value, axes.ry && axes.ry.value);
+    const metaL = document.getElementById('stickLMeta');
+    if (metaL && axes.lx && axes.ly){
+      metaL.textContent = `LX ${axes.lx.value.toFixed(2)} · LY ${axes.ly.value.toFixed(2)} — ${axes.lx.purpose} / ${axes.ly.purpose}`;
+    }
+    const metaR = document.getElementById('stickRMeta');
+    if (metaR && axes.rx && axes.ry){
+      metaR.textContent = `RX ${axes.rx.value.toFixed(2)} · RY ${axes.ry.value.toFixed(2)} — ${axes.rx.purpose} / ${axes.ry.purpose}`;
+    }
+    const buttons = data.buttons || {};
+    document.querySelectorAll('.gp-btn').forEach(el => {
+      const name = el.getAttribute('data-btn');
+      const info = buttons[name];
+      if (!info) return;
+      el.classList.toggle('active', !!info.pressed);
+      const role = el.querySelector('.gp-btn-role');
+      if (role && info.purpose) role.textContent = info.purpose;
+    });
+  }
 
   function log(msg){
     const el = document.getElementById('logList');

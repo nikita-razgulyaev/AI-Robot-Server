@@ -353,6 +353,19 @@ class RobotBrain:
         logger.warning(f"🛑 Emergency stop: {reason}")
         return {"status": "ok", "reason": reason}
 
+    async def return_to_default(self, reason: str = "panel") -> Dict:
+        """Плавно возвращает все сервы в 90° — тот же путь, что при подключении
+        платы (_glide_all_servos_to_default) и при safety-остановке, но без
+        мгновенного «телепорта»: кадры реально уходят на ESP32 и в панель."""
+        await arbiter.request(Priority.PANEL, duration_s=2.0, label=f"return_to_default:{reason}")
+        # Если идёт анимация — сначала отменяем её, иначе smooth_return
+        # интерполирует от «логического» current_angles, а не от реальной позы.
+        if self.servos.is_animating:
+            await self.servos.cancel_current()
+        await self.servos.smooth_return_to_default(on_frame=self.on_servo_frame)
+        logger.info(f"↩️ Сервы плавно возвращены в 90° ({reason})")
+        return {"status": "ok", "angles": self.servos.get_current_angles()}
+
     def get_quick_answers_status(self) -> Dict:
         return {"enabled": QUICK_ANSWERS_ENABLED, "count": quick_answers.count()}
 
@@ -568,7 +581,22 @@ class RobotBrain:
 
         variant = quick_answers.pick_response(qa)
         logger.info(f"⚡ Быстрый ответ '{qa.id}' (без LLM): {user_text!r} -> {variant.text!r}")
-        return {"text": variant.text, "action": variant.action, "emotion": variant.emotion or "calm", "audio": variant.audio}
+
+        # Голосовое переключение режима управления (заложено в id quick_answers)
+        if qa.id == "control_mode_manual":
+            from modules.control_mode import control_mode
+            control_mode.set("manual", reason="voice")
+        elif qa.id == "control_mode_autonomous":
+            from modules.control_mode import control_mode
+            control_mode.set("autonomous", reason="voice")
+
+        return {
+            "text": variant.text,
+            "action": variant.action,
+            "emotion": variant.emotion or "calm",
+            "audio": variant.audio,
+            "sfx": variant.sfx,
+        }
 
     def generate_reply(self, user_text: str) -> dict:
         """Единая точка получения ответа Сорена на текст пользователя — сначала
@@ -832,6 +860,20 @@ class RobotBrain:
         if cmd_type == "emergency_stop":
             return await self.emergency_stop(reason=command.get("reason", "manual"))
 
+        if cmd_type == "return_to_default":
+            return await self.return_to_default(reason=command.get("reason", "panel"))
+
+        if cmd_type == "set_control_mode":
+            from modules.control_mode import control_mode
+            return control_mode.set(
+                command.get("mode", "manual"),
+                reason=command.get("reason", "command"),
+            )
+
+        if cmd_type == "get_control_mode":
+            from modules.control_mode import control_mode
+            return {"status": "ok", **control_mode.to_dict()}
+
         # Пункт 12: команды прямого управления с панели резервируют арбитра на
         # Priority.PANEL — это НЕ гейт (панель выполняется всегда, у человека
         # приоритет), а сигнал остальным источникам (idle/environment) не
@@ -864,6 +906,14 @@ class RobotBrain:
             # Пункт 9-11: локомоция — источник по умолчанию геймпад (см.
             # цели проекта: "Геймпад — управление ходьбой и полётом"),
             # но source можно переопределить (например, тестовый вызов с панели).
+            from modules.control_mode import control_mode
+            src_name = str(command.get("source", "gamepad")).lower()
+            # В autonomous геймпад не двигает робота (панель и autonomous-источник — можно)
+            if control_mode.is_autonomous() and src_name == "gamepad":
+                return {
+                    "status": "rejected",
+                    "message": "Режим autonomous — геймпад отключён. Переключите на «Ручное» или управляйте с панели.",
+                }
             source = Priority[command.get("source", "GAMEPAD").upper()]
 
             # Взлёт разрешён только со стойки на опоре (кнопка лапы нажата, крыла нет).

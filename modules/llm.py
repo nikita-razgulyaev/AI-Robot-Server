@@ -275,7 +275,8 @@ class CloudLLMEngine:
             return {
                 "text": "HF_TOKEN не задан. Получи токен на https://huggingface.co/settings/tokens (с правом Make calls to Inference Providers) и добавь в .env",
                 "action": None,
-                "emotion": "calm"
+                "emotion": "calm",
+                "error": "no_api_key",
             }
 
         try:
@@ -312,13 +313,14 @@ class CloudLLMEngine:
                 try:
                     error_data = response.json()
                     error_msg = error_data.get("error", {}).get("message", f"HTTP {response.status_code}")
-                except:
+                except Exception:
                     error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
                 logger.error(f"HF Inference Providers ошибка: {error_msg}")
                 return {
                     "text": f"*(пауза)* ... Прости, друг. Ветер сменил направление. Повтори, пожалуйста. (Ошибка: {error_msg})",
                     "action": None,
-                    "emotion": "calm"
+                    "emotion": "calm",
+                    "error": error_msg,
                 }
 
             response_text = re.sub(r'^(Сорен:|Assistant:|AI:)', '', response_text).strip()
@@ -345,7 +347,8 @@ class CloudLLMEngine:
             return {
                 "text": "*(пауза)* ... Прости, друг. Мысли улетели далеко. Повтори, пожалуйста.",
                 "action": None,
-                "emotion": "calm"
+                "emotion": "calm",
+                "error": str(e),
             }
 
     def clear_history(self):
@@ -662,6 +665,14 @@ class LLMEngine:
         if engine is not None:
             engine._ensure_rag_loaded()
 
+    def _get_local_fallback(self) -> "LocalLLMEngine":
+        """Ленивая инициализация локальной модели — только когда облако реально
+        недоступно, чтобы не грузить GGUF при старте в cloud-режиме."""
+        if self.local_engine is None:
+            logger.info("💻 Инициализирую локальный LLM как запасной вариант...")
+            self.local_engine = LocalLLMEngine(self.memory)
+        return self.local_engine
+
     def generate(self, user_message: str, vision_context: str = "", memory_context: Optional[str] = None) -> dict:
         # Если вызывающий код (RobotBrain._build_memory_context) уже собрал контекст
         # памяти (включая релевантные долгосрочные воспоминания из Qdrant) — используем
@@ -673,6 +684,18 @@ class LLMEngine:
 
         if self.mode == "cloud" and self.cloud_engine:
             result = self.cloud_engine.generate(user_message, vision_context, memory_context)
+            # Облако недоступно / ошибка API — сразу переключаемся на локальную
+            # модель, не отдавая пользователю сообщение об ошибке.
+            if result.get("error"):
+                logger.warning(
+                    f"☁️ Облачный LLM недоступен ({result.get('error')}) — "
+                    f"переключаюсь на локальную модель"
+                )
+                local = self._get_local_fallback()
+                if local and local.model is not None:
+                    result = local.generate(user_message, vision_context, memory_context)
+                else:
+                    logger.error("Локальный LLM тоже недоступен — отдаю сообщение об ошибке")
         elif self.local_engine:
             result = self.local_engine.generate(user_message, vision_context, memory_context)
         else:
