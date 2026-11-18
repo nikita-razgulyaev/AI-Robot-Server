@@ -13,15 +13,6 @@ from config.settings import (
 
 logger = logging.getLogger(__name__)
 
-# FreeTTSEngine.synthesize() вызывается из двух разных контекстов:
-#  - из фонового ThreadPoolExecutor RobotBrain (там event loop в потоке нет —
-#    можно было бы просто asyncio.run());
-#  - напрямую из async-эндпоинтов FastAPI (/speak, /voice) — там loop уже
-#    работает в этом же потоке, и asyncio.run() в нём падает с
-#    "cannot be called from a running event loop".
-# Чтобы synthesize() работал в обоих случаях без разбора, кто её вызвал,
-# корутина всегда выполняется в отдельном выделенном потоке со своим новым
-# loop через этот общий executor.
 _tts_async_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tts-async")
 
 
@@ -59,7 +50,6 @@ class FreeTTSEngine:
             import librosa
             import numpy as np
 
-            # Игнорируем speaker из Silero, используем FREETTS_VOICE
             voice = self.voice
             speed_pct = int((self.speed - 1.0) * 100)
             rate_arg = f"+{speed_pct}%" if speed_pct >= 0 else f"{speed_pct}%"
@@ -77,18 +67,14 @@ class FreeTTSEngine:
                 logger.error("edge-tts вернул пустой ответ")
                 return b""
 
-            # Читаем MP3 из памяти (без временного файла) и конвертируем в PCM 16-bit mono 48kHz
             audio, sr = sf.read(io.BytesIO(mp3_bytes))
 
-            # Ресемплинг в 48kHz если нужно
             if sr != 48000:
                 audio = librosa.resample(audio, orig_sr=sr, target_sr=48000)
 
-            # В mono если stereo
             if len(audio.shape) > 1:
                 audio = audio.mean(axis=1)
 
-            # Нормализация и конвертация в int16
             if audio.size > 0:
                 max_val = max(abs(audio).max(), 1e-9)
                 audio = audio / max_val * 32767
@@ -99,7 +85,6 @@ class FreeTTSEngine:
             logger.error(f"Библиотека не установлена: {e}. Установи: pip install edge-tts soundfile librosa numpy")
             return b""
         except Exception as e:
-            # Без traceback и без километрового URL: причина — одной строкой
             status = getattr(e, "status", None)
             if status == 403:
                 logger.error("Ошибка FreeTTS (edge-tts): Microsoft отклонил запрос (HTTP 403). "
@@ -128,9 +113,9 @@ class FreeTTSEngine:
     def get_available_speakers(self) -> list:
         """Возвращает список доступных русских голосов edge-tts"""
         return [
-            "ru-RU-SvetlanaNeural",   # Женский, мягкий
-            "ru-RU-DmitryNeural",     # Мужской, уверенный
-            "ru-RU-EkaterinaNeural",  # Женский, дружелюбный
+            "ru-RU-SvetlanaNeural",
+            "ru-RU-DmitryNeural",
+            "ru-RU-EkaterinaNeural",
         ]
 
 
@@ -180,7 +165,6 @@ class LocalTTSEngine:
                 logger.error("Silero модель не загружена")
                 return b""
 
-            # Если голос не передан явно — берём из config.yaml (tts.silero_speaker)
             speaker = speaker or self.default_speaker
 
             import torch
@@ -225,12 +209,8 @@ class TTSEngine:
         self.mode = TTS_MODE
         self.local_engine = None
         self.cloud_engine = None
-        # Текущий выбранный голос отдельно для каждого режима — переключение
-        # local/cloud не сбрасывает выбор голоса внутри другого режима.
         self.local_speaker = SILERO_SPEAKER
         self.cloud_speaker = FREETTS_VOICE
-        # После неудачи облака не дёргаем его на каждую фразу (лишняя секунда ожидания):
-        # до этого момента (time.monotonic) сразу идём на локальный Silero.
         self._cloud_down_until = 0.0
 
         if self.mode == "cloud":
@@ -306,12 +286,9 @@ class TTSEngine:
         В local-режиме speaker=None -> берётся SILERO_SPEAKER из config.yaml."""
         if self.mode == "cloud" and self.cloud_engine:
             if self._cloud_available():
-                # Не передаём speaker — FreeTTSEngine использует self.voice (FREETTS_VOICE)
                 audio = self.cloud_engine.synthesize(text)
                 if audio:
                     return audio
-                # edge-tts — неофициальный клиент, периодически отваливается (Microsoft
-                # меняет защиту). Не молчим — озвучиваем локальным Silero как запасным.
                 self._mark_cloud_down()
             return self._get_local_fallback().synthesize(text, speaker)
         elif self.local_engine:

@@ -29,7 +29,7 @@ from typing import Awaitable, Callable, Deque, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-SOURCES = ("robot", "pc", "panel")   # откуда реплика: плата, микрофон ПК, текст из панели
+SOURCES = ("robot", "pc", "panel")
 
 
 class ChatLog:
@@ -83,7 +83,7 @@ class ChatLog:
             try:
                 self._loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self._safe_broadcast(msg)))
             except RuntimeError:
-                pass  # loop уже закрыт (остановка сервера)
+                pass
         return event["id"]
 
     async def emit_async(self, role: str, text: str, emotion: Optional[str] = None, source: str = "robot",

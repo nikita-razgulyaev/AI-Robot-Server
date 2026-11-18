@@ -59,7 +59,7 @@ time 0     нейтраль
 
 ### 3. Взмах (`SINGLE_FLAP`), поворот (`SINGLE_TURN_TICK`)
 
-- Взмах: каналы 0 и 3 (`L/R_WING_FLAP`) — заглушка 50° ↔ 130°.
+- Взмах: каналы 0 и 3 (`L/R_WING_FLAP`) — синусоида 90 → 120 → 90 → 60 → 90 (`FLAP_MIN_DEG`/`FLAP_MAX_DEG`/`FLAP_NEUTRAL_DEG`). Непрерывный взмах с геймпада — `modules/wing_flap.py` (см. CONTROL.md). В режиме ходьбы крылья держатся на `WING_WALK_DEG` = 0°.
 - Поворот: `TAIL_YAW` (CH14). Знак угла в `build_turn` зеркалит yaw.
 
 ### 4. Взлёт / посадка
@@ -82,7 +82,7 @@ TURN_STEP_DEG = 15.0      # ° за один SINGLE_TURN_TICK
 | Примитив | Где править | Ключевые каналы (заглушка) | Длительность цикла |
 |---|---|---|---|
 | Шаг | `SINGLE_STEP` | CH02, CH05 | 1000 мс |
-| Взмах | `SINGLE_FLAP` | CH00, CH03 | 600 мс |
+| Взмах | `SINGLE_FLAP` / `wing_flap.py` | CH00, CH03 (60…120°) | 600 мс |
 | Поворот | `SINGLE_TURN_TICK` | CH14 TAIL_YAW | 400 мс |
 | Взлёт | `TAKEOFF` | CH07/11 бедро, CH00/03 крылья | 750 мс |
 | Посадка | `LANDING` | CH16 хвост, CH07/11/08/12 лапы | 700 мс |
